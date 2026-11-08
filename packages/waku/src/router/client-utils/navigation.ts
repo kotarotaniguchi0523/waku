@@ -49,7 +49,11 @@ import {
   getSettledRoute as resolveSettledRoute,
 } from './router-state.js';
 import type { RouterState } from './router-state.js';
-import { scrollToHash, shouldScrollForRouteChange } from './scroll.js';
+import {
+  scrollToHash,
+  shouldScrollForRouteChange,
+  waitForHashTarget,
+} from './scroll.js';
 
 type Elements = Readonly<Record<string | symbol, unknown>>;
 
@@ -141,6 +145,13 @@ export function useNavigation(
   const route = destination ? destination.route : initialRoute;
   const requestRef = useRef<NavigationRequest>(undefined);
   const appliedRef = useRef<{ state: RouterState; href: string }>(undefined);
+  const pendingHashScroll = useRef<() => void>(undefined);
+  const cancelHashScroll = useCallback(() => {
+    pendingHashScroll.current?.();
+    pendingHashScroll.current = undefined;
+  }, []);
+  useLayoutEffect(() => cancelHashScroll, [cancelHashScroll]);
+
   const destinationHref = destination?.url.href;
   const currentHash = route.hash;
   useLayoutEffect(() => {
@@ -160,6 +171,7 @@ export function useNavigation(
     const originalState = routerState.originalState ?? routerState;
     const applied = appliedRef.current?.state === originalState;
     if (!applied || appliedRef.current?.href !== destinationHref) {
+      cancelHashScroll();
       commitHistory(
         new URL(destinationHref),
         applied ? 'replace' : routerState.history,
@@ -170,8 +182,21 @@ export function useNavigation(
       return;
     }
     const { pathChanged } = routerState.scroll;
-    scrollToHash(currentHash, pathChanged ? 'instant' : 'auto', pathChanged);
-  }, [cache, elements, routerState, destinationHref, currentHash]);
+    const behavior = pathChanged ? 'instant' : 'auto';
+    if (
+      !scrollToHash(currentHash, behavior, pathChanged) &&
+      !routerState.failedFrom
+    ) {
+      pendingHashScroll.current = waitForHashTarget(currentHash, behavior);
+    }
+  }, [
+    cache,
+    elements,
+    routerState,
+    destinationHref,
+    currentHash,
+    cancelHashScroll,
+  ]);
 
   const replaceRequest = useCallback((next?: NavigationRequest) => {
     const superseded = requestRef.current;
@@ -285,6 +310,7 @@ export function useNavigation(
           options.onSuperseded?.();
         }
       });
+      cancelHashScroll();
       replaceRequest(request);
       if (requestRef.current !== request) {
         return;
@@ -514,6 +540,7 @@ export function useNavigation(
       mergeElements,
       getElements,
       replaceRequest,
+      cancelHashScroll,
       has404,
       registerRscReloadListener,
     ],

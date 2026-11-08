@@ -30,39 +30,60 @@ const getHashElement = (hash: string): HTMLElement | null => {
 };
 export const getHashElementForTest = getHashElement;
 
+const HASH_TARGET_TIMEOUT_MS = 5_000;
+
+function scrollToHashElement(element: HTMLElement, behavior: ScrollBehavior) {
+  const scrollMarginTop =
+    Number.parseFloat(window.getComputedStyle(element).scrollMarginTop) || 0;
+  window.scrollTo({
+    left: 0,
+    top: element.getBoundingClientRect().top + window.scrollY - scrollMarginTop,
+    behavior,
+  });
+}
+
 export function scrollToHash(
   hash: string,
   behavior: ScrollBehavior,
   scrollTopForMissingHash: boolean,
 ) {
-  if (hash) {
-    const element = getHashElement(hash);
-    if (!element) {
-      if (!scrollTopForMissingHash) {
-        return;
-      }
-      window.scrollTo({
-        left: 0,
-        top: 0,
-        behavior,
-      });
+  const target = hash ? getHashElement(hash) : null;
+  if (target) {
+    scrollToHashElement(target, behavior);
+    return true;
+  }
+  if (!hash || scrollTopForMissingHash) {
+    window.scrollTo({ left: 0, top: 0, behavior });
+  }
+  return !hash;
+}
+
+// Observe only a fragment the router has already tried to scroll to.
+export function waitForHashTarget(hash: string, behavior: ScrollBehavior) {
+  const href = window.location.href;
+  const observer = new MutationObserver(() => {
+    if (window.location.href !== href) {
+      stop();
       return;
     }
-    const scrollMarginTop =
-      Number.parseFloat(window.getComputedStyle(element).scrollMarginTop) || 0;
-    window.scrollTo({
-      left: 0,
-      top:
-        element.getBoundingClientRect().top + window.scrollY - scrollMarginTop,
-      behavior,
-    });
-    return;
-  }
-  window.scrollTo({
-    left: 0,
-    top: 0,
-    behavior,
+    const target = getHashElement(hash);
+    if (target) {
+      stop();
+      scrollToHashElement(target, behavior);
+    }
   });
+  const stop = () => {
+    observer.disconnect();
+    clearTimeout(timeout);
+  };
+  const timeout = setTimeout(stop, HASH_TARGET_TIMEOUT_MS);
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['id', 'name'],
+  });
+  return stop;
 }
 
 export function shouldScrollByDefault(url: URL) {

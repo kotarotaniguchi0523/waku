@@ -59,6 +59,30 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           plain post 2
         </Link>
         {' | '}
+        <Link to="/post/2#post-anchor" data-testid="link-plain-anchor">
+          plain post anchor
+        </Link>
+        {' | '}
+        <Link
+          to="/post/2#post-anchor"
+          unstable_instant
+          data-testid="link-instant-anchor"
+        >
+          instant post anchor
+        </Link>
+        {' | '}
+        <Link to="/post/2#late-anchor" data-testid="link-late-anchor">
+          late anchor
+        </Link>
+        {' | '}
+        <Link
+          to="/post/2#late-anchor"
+          scroll={false}
+          data-testid="link-late-anchor-no-scroll"
+        >
+          late anchor without scrolling
+        </Link>
+        {' | '}
         <MinimalRefetch />
       </nav>
       <main>
