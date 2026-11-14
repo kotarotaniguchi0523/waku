@@ -333,7 +333,9 @@ test.describe('waku-navigation', () => {
     await page.goto(`http://localhost:${port}/`);
     await waitForHydration(page);
     const releaseLatest = Promise.withResolvers<void>();
+    const latestRequested = Promise.withResolvers<void>();
     await page.route('**/RSC/R/hello/latest.txt*', async (route) => {
+      latestRequested.resolve();
       const response = await route.fetch();
       await releaseLatest.promise;
       await route.fulfill({ response });
@@ -345,7 +347,8 @@ test.describe('waku-navigation', () => {
           .navigate('/hello/latest')
           .finished?.catch(() => {});
       });
-      await expect(page).toHaveURL(/\/hello\/latest$/);
+      // the newer navigation is loading; its URL commits with its response
+      await latestRequested.promise;
       await releaseRedirect();
       // the late redirect page stays on screen while /hello/latest is held
       await expect(page.getByTestId('late-redirect-sent')).toBeVisible();
