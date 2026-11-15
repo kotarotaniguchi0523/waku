@@ -390,7 +390,7 @@ not stored in the element record.
 | ---------------------------------------- | ------------------------- | --------------------------------------------------------------- |
 | URL, history entries, scroll, focus      | Browser (`navigation`)    | The address bar and what Back and Forward return to.            |
 | Displayed route, elements, fetch error   | Router's React state      | Select the content that renders together.                       |
-| Live attempts and the last committed one | Router refs               | Drop superseded work and route server function results.         |
+| Live attempts and the last committed one | Router binding            | Drop superseded work and route server function results.         |
 | Elements, etags, Flight decoding         | Minimal's controlled Root | Render slots and merge updates into the state the router holds. |
 
 A navigation passes through these points:
@@ -424,9 +424,10 @@ the stream runs to the end even if the navigation is dropped, because content
 on screen may still read from it.
 
 A response that arrives while a server function has merged newer values keeps
-those values: the patch omits slots that changed since the request started. If
-a navigation makes the router drop a server function's refresh and is then
-abandoned, the shown route is fetched again.
+those values: the patch omits slots that changed since the request started. A
+server function's rerender of the displayed route that arrives while a
+navigation is loading is added to the queued frames, so it is not lost if that
+navigation is abandoned.
 
 Instant navigation shows a preview frame at once: the held shell with the
 parts that need the server left pending. The response then fills them in. A

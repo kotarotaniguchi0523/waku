@@ -15,16 +15,64 @@ Six rules describe the client router. Read them before changing it.
 
 ## Reading order
 
-1. `client-utils/navigation.ts`: the `navigate` listener, attempts, and the
-   frame updates.
-2. `client-core-utils/load.ts`: fetch, redirect and 404 follows.
-3. `client.tsx` and `../minimal/client-runtime.tsx` (`ControlledRoot`): where
-   the frame is held and handed to Minimal.
-4. `client-core-utils/server-function-routing.ts`: what a server function
-   response may do to the route.
+A normal navigation is these four files, about 500 lines of code:
 
-Prefetching, instant navigation and SSR are separate; read them only when a
-change touches them.
+1. `client-utils/navigation.ts`: the `navigate` listener. It starts an
+   attempt, resolves the route once, and queues the frame that shows the
+   result. The same promise is awaited before the URL moves (push, replace)
+   and after (Back, Forward, reload).
+2. `client-utils/resolve.ts`: request to outcome. It fetches and follows the
+   route and touches neither the browser nor React.
+3. `client-utils/frame.ts`: `RenderFrame` and the functions that produce the
+   next frame from the previous one and an outcome. All pure.
+4. `client-utils/attempts.ts`: which navigations can still change the screen.
+
+Then, as needed:
+
+- `client-core-utils/load.ts`: redirect and 404 follows inside `resolve()`.
+- `client.tsx` and `../minimal/client-runtime.tsx` (`ControlledRoot`): where
+  the frame is held and handed to Minimal.
+- `client-core-utils/server-function-routing.ts`: what a server function
+  response may do to the route.
+- `client-utils/route-intent.tsx`: redirects and not-found that settle after
+  their page is shown.
+
+Each of these is used from one place in `navigation.ts` and can be read on
+its own: `instant-preview.ts` (instant navigation), `traversal-guard.ts`
+(refusing Back and Forward), `handoff.ts` (leaving for a document load),
+`scroll.ts` (a fragment target that renders late). Prefetching and SSR are
+separate as well.
+
+## State
+
+`RenderFrame` is a union. Each shape holds only what exists in that state,
+so a combination that cannot happen cannot be written:
+
+| `kind`    | Meaning                                        | Has                        |
+| --------- | ---------------------------------------------- | -------------------------- |
+| `initial` | The document as served; nothing has navigated  | elements, scope            |
+| `preview` | An instant navigation shows the shell it holds | + route, origin, committed |
+| `ready`   | A navigation's response is shown               | + route, origin, committed |
+| `failed`  | A navigation could not load                    | + route, origin, error     |
+
+Code that needs a field switches on `kind`; add a shape and the compiler
+points at every place that has to decide about it. Frames are created only by
+the functions in `frame.ts`.
+
+An attempt is in one of two slots. `loading` has not moved the URL and is
+dropped by any newer navigation. `owner` has moved the URL and is replaced
+only by the next navigation that moves it. An attempt leaves its slot when
+its content is shown; nothing aborts it after that.
+
+## Tests
+
+- `tests/router-frame.test.ts`, `router-resolve.test.ts` and
+  `router-attempts.test.ts` check the pure parts through their inputs and
+  outputs, with a fake server as the only stand-in. Start here: they run in
+  a second.
+- `e2e/navigation-contract.spec.ts` checks the rules below from the outside:
+  the address bar, the visible content, scroll, Back and Forward, and the
+  public router API.
 
 ## What must stay true
 
@@ -37,6 +85,9 @@ change touches them.
 - The intercepted navigation finishes when React commits the frame's shell,
   not when every streamed part has arrived.
 - An older navigation, action or late intent cannot replace newer content.
+- A server function's rerender of the displayed route is not lost to a
+  navigation that is loading: it joins the queued frames, so it is shown if
+  the user stays on, or returns to, that route.
 - Once a navigation has moved the URL, only a later navigation that moves the
   URL can drop it.
 - A response is cancelled only until React has it.
@@ -49,9 +100,6 @@ change touches them.
 - Every attempt settles: abort, error and unmount leave nothing pending.
 - Navigation works with prefetching and instant navigation turned off.
 - A slot the server omitted because the client already holds it is kept.
-
-`e2e/navigation-contract.spec.ts` checks these from the outside: the address
-bar, the visible content, scroll, Back and Forward, and the public router API.
 
 ## Decided limits
 
