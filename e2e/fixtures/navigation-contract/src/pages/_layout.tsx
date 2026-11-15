@@ -1,6 +1,11 @@
 import type { ReactNode } from 'react';
 import { Link } from 'waku';
-import { ActionPanel, Hydrated, RouteProbe } from '../components/probes.js';
+import {
+  ActionPanel,
+  Hydrated,
+  LeaveDocument,
+  RouteProbe,
+} from '../components/probes.js';
 
 const gatedIds = ['t01', 't05', 't06', 't06b'];
 const gatedChildIds = ['t04'];
@@ -25,6 +30,9 @@ export default function Layout({ children }: { children: ReactNode }) {
         {/* No such page exists, so the typed routes do not include it. */}
         <Link to={'/missing' as never} data-testid="go-missing">
           Missing
+        </Link>
+        <Link to="/broken" data-testid="go-broken">
+          Broken
         </Link>
         <Link to="/fragment#target" data-testid="go-fragment">
           Fragment
@@ -51,6 +59,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       <Hydrated />
       <RouteProbe />
       <ActionPanel />
+      <LeaveDocument />
       {children}
     </div>
   );

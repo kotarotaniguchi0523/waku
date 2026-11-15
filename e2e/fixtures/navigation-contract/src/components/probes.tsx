@@ -77,3 +77,33 @@ export const ActionPanel = () => {
     </div>
   );
 };
+
+// Asks for confirmation before the document unloads, then offers a link that
+// leaves this document by going to another origin.
+export const LeaveDocument = () => {
+  const [armed, setArmed] = useState(false);
+  const [otherOrigin, setOtherOrigin] = useState('');
+  return (
+    <div>
+      <button
+        type="button"
+        data-testid="arm-leave-confirmation"
+        onClick={() => {
+          window.addEventListener('beforeunload', (event) => {
+            event.preventDefault();
+          });
+          // localhost and 127.0.0.1 are the same server but different origins.
+          setOtherOrigin(`http://127.0.0.1:${location.port}/plain`);
+          setArmed(true);
+        }}
+      >
+        Confirm before leaving
+      </button>
+      {armed && (
+        <a href={otherOrigin} data-testid="leave-document">
+          Leave this document
+        </a>
+      )}
+    </div>
+  );
+};

@@ -230,6 +230,25 @@ test.describe('navigation-contract', () => {
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   });
 
+  test('T12: after cancelling a document unload, in-app navigation still works', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('arm-leave-confirmation').click();
+    let dismissed = 0;
+    page.on('dialog', (dialog) => {
+      dismissed += 1;
+      void dialog.dismiss();
+    });
+    await page.getByTestId('leave-document').click();
+    await expect.poll(() => dismissed).toBe(1);
+    await expect(page).toHaveURL(`${origin()}/`);
+    await expect(shownPage(page)).toHaveText('home');
+    await page.getByTestId('go-plain').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+  });
+
   test('T13: code after awaiting router.push inside an async action runs', async ({
     page,
   }) => {
@@ -238,6 +257,25 @@ test.describe('navigation-contract', () => {
     await expect(page.getByTestId('push-result')).toHaveText('continued');
     await expect(shownPage(page)).toHaveText('plain');
     await expect(page).toHaveURL(`${origin()}/plain`);
+  });
+
+  // The address bar expectation records today's policy: a navigation whose
+  // page fails moves to the failed URL and shows an error there.
+  test('T17: after a navigation fails, Back returns to a working page', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-plain').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await page.getByTestId('go-broken').click();
+    await expect(page).toHaveURL(`${origin()}/broken`);
+    await expect(shownPage(page)).toHaveCount(0);
+    await page.goBack();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+    await page.getByTestId('go-home').click();
+    await expect(shownPage(page)).toHaveText('home');
+    await expect(page).toHaveURL(`${origin()}/`);
   });
 
   test('T15: opening a URL with query and hash hydrates and reports both', async ({
