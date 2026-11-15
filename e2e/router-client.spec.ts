@@ -819,7 +819,15 @@ test.describe('router-client', () => {
 
     // Dispatched, because some browsers make click() wait for the navigation.
     await page.getByTestId('pending-link').dispatchEvent('click');
-    await expect(page.getByTestId('pending-indicator')).toBeVisible();
+    // Read from the page: one browser driver holds locators back until the
+    // pending navigation finishes, which is after the indicator has gone.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => !!document.querySelector('[data-testid="pending-indicator"]'),
+        ),
+      )
+      .toBe(true);
     await expect(page.getByRole('heading', { name: 'Next' })).toBeVisible();
     await expect(page.getByTestId('pending-indicator')).toHaveCount(0);
   });
