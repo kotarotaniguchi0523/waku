@@ -21,8 +21,8 @@ A normal navigation is these files:
    It starts an attempt, resolves the route once, and shows the result.
    `nextStep()` decides what a result calls for: show it, move the entry to
    another URL, or hand the destination to the browser. Push and replace
-   wait for the result before the URL moves; Back, Forward, reload and an
-   instant navigation after.
+   wait for the result before the URL moves; Back, Forward and an instant
+   navigation after.
 2. `client-utils/resolve.ts`: request to outcome. It fetches and follows the
    route and touches neither the browser nor React.
 3. `client-utils/frame.ts`: `RenderFrame` and the functions that produce the
@@ -129,9 +129,16 @@ case reported as superseded.
   `navigate` event and renders the destination itself; they share the
   document's URL and history. Server function calls go to the most recently
   mounted one.
-- `push()` and `replace()` resolve when the frame is queued or the navigation
-  is superseded, and reject when the route fails to load. They do not report
-  a frame that was queued and then abandoned before it was shown.
+- `push()` and `replace()` resolve when the frame is queued, and also when
+  the navigation is dropped or handed to the browser as a document load.
+  They reject when the route fails to load. An instant navigation resolves
+  once its preview is queued; a failure of the response that fills it in is
+  shown but not reported to the caller. None of them reports a frame that
+  was queued and then abandoned before it was shown.
+- `unstable_onSuperseded` is called when another navigation takes this one's
+  place, and when the browser cancels it before the URL moved, which the
+  Stop button does too. It is not called for a hand-off, an error, an
+  unmount, or the navigation that carries on from a redirect.
 
 ## Checks that need a real device
 

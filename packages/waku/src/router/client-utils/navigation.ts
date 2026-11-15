@@ -11,7 +11,7 @@ import {
   getRouteFromElements,
   isStaticFromElements,
 } from '../isomorphic-utils/router-protocol.js';
-import { createAttempts } from './attempts.js';
+import { SUPERSEDED, createAttempts } from './attempts.js';
 import type { Attempt } from './attempts.js';
 import {
   failedHere,
@@ -38,6 +38,10 @@ export type Committed = Displayed & {
 };
 
 const runNow = (update: () => void) => update();
+
+/** Abort reasons of navigations that no other navigation took the place of. */
+const UNMOUNTED = Symbol('unmounted');
+const OUTDATED = Symbol('outdated');
 
 // A dropped update is expected. Anything else would otherwise disappear
 // without a trace.
@@ -147,7 +151,9 @@ export function createNavigation(
       ignoreRejection(show(attempt, outcome));
     } catch (e) {
       if (attempt.signal.aborted) {
-        options.onSuperseded?.();
+        if (attempt.signal.reason === SUPERSEDED) {
+          options.onSuperseded?.();
+        }
         return;
       }
       throw e;
@@ -225,7 +231,7 @@ export function createNavigation(
         navigation.removeEventListener('currententrychange', onEntryChange);
       };
     },
-    disconnect: () => attempts.dropAll(),
+    disconnect: () => attempts.dropAll(UNMOUNTED),
     getElements: () => current.elements,
     getRoute: () => current.route,
     getOrigin: () => originOfFrame(current.frame),
@@ -249,7 +255,7 @@ export function createNavigation(
     getRefetchRoute: () => attempts.queuedRoute() ?? current.route,
     // A navigation still waiting for its response was requested from code
     // that has since changed; its response must not be shown.
-    dropLoading: () => attempts.dropLoading(),
+    dropLoading: () => attempts.dropLoading(OUTDATED),
     // Follows a redirect or not-found that settled after its page was
     // shown. It continues the navigation that page came from, so it counts
     // against the same limit of follows.
@@ -273,6 +279,8 @@ export function createNavigation(
       const source: Source = {
         kind: 'response',
         response: Promise.resolve(response),
+        // A rerender of the displayed route is still the same navigation.
+        follows: sameRoute ? (originOfFrame(current.frame)?.follows ?? 0) : 0,
       };
       const apply: ChangeRoute = (route, options) =>
         request(route, options, source);

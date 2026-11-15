@@ -19,9 +19,13 @@ import { acceptReturn, guardTraversal, quiet } from './traversal-guard.js';
 import type { Interceptor } from './traversal-guard.js';
 
 type Rendered = Extract<Outcome, { kind: 'render' }>;
+type Previewed = Extract<Outcome, { kind: 'preview' }>;
 
 /** The abort reason of a navigation that became a document load. */
 const HANDED_OFF = Symbol('handed off');
+
+/** The abort reason of a navigation whose result another one carries on. */
+const CONTINUED = Symbol('continued');
 
 /** The options that apply to a navigation the browser carries out. */
 type Options = Pick<
@@ -86,6 +90,40 @@ export const nextStep = (outcome: Outcome, entryUrl: string): Step => {
     : { kind: 'show', outcome };
 };
 
+/**
+ * Starts resolving a navigation. With `wantsPreview` and the destination's
+ * shell at hand, it also returns a preview to show until the response has
+ * arrived; the response then comes from the request the preview started.
+ */
+function begin(
+  request: Omit<Request, 'source'>,
+  source: NavigationSource,
+  wantsPreview: boolean,
+  shown: Displayed & { cache: RouterCache },
+  signal: AbortSignal,
+): { outcome: Promise<Outcome>; preview: Previewed | undefined } {
+  if (source.kind === 'resolved') {
+    return { outcome: Promise.resolve(source.outcome), preview: undefined };
+  }
+  const instant = wantsPreview
+    ? startPreview({ ...request, source }, shown, shown.cache, signal)
+    : undefined;
+  const outcome = resolve(
+    {
+      ...request,
+      source: instant
+        ? { kind: 'response', response: instant.response, follows: 0 }
+        : source,
+    },
+    shown,
+    shown.cache,
+    signal,
+  );
+  // Both handlers of the listener wait for it; neither may be reached.
+  ignoreRejection(outcome);
+  return { outcome, preview: instant?.preview };
+}
+
 /** What the listener needs from the binding. */
 export type Binding = {
   /** What the last commit showed. */
@@ -102,7 +140,7 @@ export type Binding = {
  *
  * Push and replace wait for the result before the URL moves, so the address
  * bar and the content change together and a redirect leaves no entry of its
- * own. Back, Forward and reload have already moved. An instant navigation
+ * own. Back and Forward have already moved. An instant navigation
  * moves at once too, shows the shell it holds, and fills it in afterwards.
  */
 export function createNavigateListener({ at, attempts, start, show }: Binding) {
@@ -153,7 +191,7 @@ export function createNavigateListener({ at, attempts, start, show }: Binding) {
     event.signal.addEventListener('abort', () => {
       // Once the URL has moved, only a later URL-taking navigation drops it.
       if (attempts.isLoading(attempt)) {
-        attempt.abort();
+        attempt.abort(SUPERSEDED);
       }
     });
     attempt.signal.addEventListener('abort', () => {
@@ -172,53 +210,21 @@ export function createNavigateListener({ at, attempts, start, show }: Binding) {
       }
     };
     // An error ends the navigation; no other navigation took its place.
-    const reporting =
-      <Args extends unknown[]>(run: (...args: Args) => Promise<void>) =>
-      async (...args: Args) => {
-        try {
-          await run(...args);
-        } catch (error) {
-          fail(error);
-          attempt.abort(error);
-          throw error;
-        }
-      };
+    const stop = (error: unknown) => {
+      fail(error);
+      attempt.abort(error);
+      throw error;
+    };
 
-    // The result is resolved once; both handlers below wait for it. With
-    // the destination's shell at hand, an instant navigation also gets a
-    // preview to show until the response has arrived.
+    // The result is resolved once; both handlers below wait for it.
     const source = info?.source ?? fetched;
-    let instant: ReturnType<typeof startPreview>;
-    let outcome: Promise<Outcome>;
-    if (source.kind === 'resolved') {
-      outcome = Promise.resolve(source.outcome);
-    } else {
-      const request: Request = {
-        route,
-        url,
-        scroll: options.shouldScroll,
-        refetch: options.refetch,
-        source,
-      };
-      const { cache } = at();
-      if (options.instant && waitsBeforeCommit) {
-        instant = startPreview(request, at(), cache, attempt.signal);
-      }
-      outcome = resolve(
-        instant
-          ? {
-              ...request,
-              source: { kind: 'response', response: instant.response },
-            }
-          : request,
-        at(),
-        cache,
-        attempt.signal,
-      );
-    }
-    ignoreRejection(outcome);
-    // The URL this navigation's entry is at, or will be once it commits.
-    let entryUrl = event.destination.url;
+    const { outcome, preview } = begin(
+      { route, url, scroll: options.shouldScroll, refetch: options.refetch },
+      source,
+      !!options.instant && waitsBeforeCommit,
+      at(),
+      attempt.signal,
+    );
 
     // Queues the frame for a result. With that, the caller can go on.
     const present = (result: Shown) => {
@@ -232,7 +238,7 @@ export function createNavigateListener({ at, attempts, start, show }: Binding) {
     };
 
     // After the URL has moved: leave, replace the entry, or show.
-    const finish = async () => {
+    const finish = async (entryUrl: string) => {
       const step = nextStep(await outcome, entryUrl);
       switch (step.kind) {
         case 'handOff':
@@ -248,7 +254,10 @@ export function createNavigateListener({ at, attempts, start, show }: Binding) {
               result.route,
               result.url,
               'replace',
-              { shouldScroll: options.shouldScroll },
+              {
+                shouldScroll: options.shouldScroll,
+                onSuperseded: options.onSuperseded,
+              },
               {
                 kind: 'resolved',
                 outcome:
@@ -269,50 +278,60 @@ export function createNavigateListener({ at, attempts, start, show }: Binding) {
       }
     };
 
+    const beforeCommit = async (controller: NavigationPrecommitController) => {
+      const step = nextStep(await outcome, event.destination.url);
+      if (step.kind === 'handOff') {
+        // Cancel this navigation first. A document navigation started
+        // while it is still being cancelled can be cancelled with it.
+        setTimeout(() => handOff(step.outcome, push));
+        attempt.abort(HANDED_OFF);
+        throw abortError();
+      }
+      if (step.kind === 'move') {
+        controller.redirect(step.outcome.url.href);
+      }
+    };
+
+    const afterCommit = async () => {
+      // A navigation that carries on from the one it replaces does not
+      // supersede it.
+      attempts.own(
+        attempt,
+        source.kind === 'resolved' ? CONTINUED : SUPERSEDED,
+      );
+      // Both belong to this navigation while it is the browser's current
+      // one. The entry is where a redirect before the commit has put it.
+      const { transition, currentEntry } = window.navigation;
+      const entryUrl = currentEntry?.url ?? event.destination.url;
+      let failed = false;
+      if (preview) {
+        await present(preview);
+        finish(entryUrl)
+          .catch(stop)
+          .catch(() => {});
+      } else {
+        await finish(entryUrl);
+        failed = (await outcome).kind === 'failed';
+      }
+      if (options.shouldScroll && pushOrReplace && !failed) {
+        // After the browser's own scroll, which misses a fragment target
+        // that renders late.
+        transition?.finished.then(
+          () => scrollToHashWhenRendered(at().route.hash),
+          () => {},
+        );
+      }
+    };
+
     event.intercept({
       ...(options.shouldScroll ? {} : quiet),
-      ...(waitsBeforeCommit && !instant
+      ...(waitsBeforeCommit && !preview
         ? {
-            precommitHandler: reporting(async (controller) => {
-              const step = nextStep(await outcome, entryUrl);
-              if (step.kind === 'handOff') {
-                // Cancel this navigation first. A document navigation
-                // started while it is still being cancelled can be
-                // cancelled with it.
-                setTimeout(() => handOff(step.outcome, push));
-                attempt.abort(HANDED_OFF);
-                throw abortError();
-              }
-              if (step.kind === 'move') {
-                entryUrl = step.outcome.url.href;
-                controller.redirect(entryUrl);
-              }
-            }),
+            precommitHandler: (controller) =>
+              beforeCommit(controller).catch(stop),
           }
         : {}),
-      handler: reporting(async () => {
-        attempts.own(attempt);
-        // This navigation's, read while it is the browser's current one.
-        const { transition } = window.navigation;
-        if (instant) {
-          await present(instant.preview);
-          finish().catch((error) => {
-            if (!attempt.signal.aborted) {
-              fail(error);
-            }
-          });
-        } else {
-          await finish();
-        }
-        if (options.shouldScroll && pushOrReplace) {
-          // After the browser's own scroll, which misses a fragment target
-          // that renders late.
-          transition?.finished.then(
-            () => scrollToHashWhenRendered(at().route.hash),
-            () => {},
-          );
-        }
-      }),
+      handler: () => afterCommit().catch(stop),
     });
   };
 }

@@ -13,12 +13,19 @@ import type { Elements, Outcome } from './frame.js';
 import { abortError } from './promises.js';
 import { resolveServerRedirect } from './server-redirect.js';
 
-/** Where the elements of a request come from. */
+/**
+ * Where the elements of a request come from. `follows` counts the redirects
+ * and not-found pages that led to this request.
+ */
 export type Source =
-  /** The route is fetched; `follows` counts what led here already. */
+  /** The route is fetched. */
   | { readonly kind: 'fetch'; readonly follows: number }
   /** A response already on its way, as from a server function. */
-  | { readonly kind: 'response'; readonly response: Promise<Elements> };
+  | {
+      readonly kind: 'response';
+      readonly response: Promise<Elements>;
+      readonly follows: number;
+    };
 
 /** A fetch that follows on nothing. */
 export const fetched: Source = { kind: 'fetch', follows: 0 };
@@ -53,7 +60,7 @@ export async function resolve(
 ): Promise<Outcome> {
   const { route, url, scroll, source } = request;
   const adopt = source.kind === 'response' ? source.response : undefined;
-  const follows = source.kind === 'fetch' ? source.follows : 0;
+  const { follows } = source;
   const base = shown.elements;
   const sameRoute = isSameRscRoute(route, shown.route);
   const shouldRefetch = adopt !== undefined || (request.refetch ?? !sameRoute);

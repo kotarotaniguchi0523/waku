@@ -22,7 +22,7 @@ describe('attempts', () => {
     attempts.own(first);
     const second = attempts.start(route('/b'));
     expect(first.signal.aborted).toBe(false);
-    second.abort();
+    second.abort(SUPERSEDED);
     expect(first.signal.aborted).toBe(false);
     expect(attempts.pending(0)).toBe(first);
   });
@@ -70,10 +70,10 @@ describe('attempts', () => {
     const owner = attempts.start(route('/a'));
     attempts.own(owner);
     const loading = attempts.start(route('/b'));
-    attempts.dropLoading();
+    attempts.dropLoading(SUPERSEDED);
     expect(loading.signal.aborted).toBe(true);
     expect(owner.signal.aborted).toBe(false);
-    attempts.dropAll();
+    attempts.dropAll(SUPERSEDED);
     expect(owner.signal.aborted).toBe(true);
   });
 
@@ -97,6 +97,15 @@ describe('attempts', () => {
     attempts.own(older);
     expect(newer.signal.aborted).toBe(false);
     expect(attempts.isLoading(newer)).toBe(true);
+  });
+
+  test('a navigation that carries on from the owner drops it for that reason', () => {
+    const attempts = createAttempts();
+    const first = attempts.start(route('/a'));
+    attempts.own(first);
+    const carriedOn = Symbol('continued');
+    attempts.own(attempts.start(route('/b')), carriedOn);
+    expect(first.signal.reason).toBe(carriedOn);
   });
 
   test('a displaced navigation is superseded; one that ends itself is not', () => {

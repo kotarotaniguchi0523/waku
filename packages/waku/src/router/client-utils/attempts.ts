@@ -9,8 +9,8 @@ export type Attempt = {
   readonly id: number;
   /** Aborts when the navigation is dropped; the reason says why. */
   readonly signal: AbortSignal;
-  /** Drops the navigation. Without a reason it counts as superseded. */
-  readonly abort: (reason?: unknown) => void;
+  /** Drops the navigation for `reason`. */
+  readonly abort: (reason: unknown) => void;
   /** The route asked for. */
   readonly target: RouteProps;
 };
@@ -35,7 +35,7 @@ export function createAttempts() {
       const attempt: Attempt = {
         id: ++nextId,
         signal: controller.signal,
-        abort: (reason = SUPERSEDED) => controller.abort(reason),
+        abort: (reason) => controller.abort(reason),
         target,
       };
       controller.signal.addEventListener('abort', () => {
@@ -46,21 +46,24 @@ export function createAttempts() {
           owner = undefined;
         }
       });
-      loading?.abort();
+      loading?.abort(SUPERSEDED);
       loading = attempt;
       return attempt;
     },
-    /** The URL now belongs to `attempt`; older navigations give way. */
-    own(attempt: Attempt) {
+    /**
+     * The URL now belongs to `attempt`; older navigations give way. `reason`
+     * is why the navigation that had the URL is dropped.
+     */
+    own(attempt: Attempt, reason: unknown = SUPERSEDED) {
       if (loading && loading.id <= attempt.id) {
         const older = loading;
         loading = undefined;
         if (older !== attempt) {
-          older.abort();
+          older.abort(SUPERSEDED);
         }
       }
       if (owner?.attempt !== attempt) {
-        owner?.attempt.abort();
+        owner?.attempt.abort(reason);
         owner = attempt.signal.aborted
           ? undefined
           : { attempt, queued: undefined };
@@ -94,12 +97,12 @@ export function createAttempts() {
       return owner?.queued;
     },
     /** Drops the navigation still waiting to move the URL. */
-    dropLoading() {
-      loading?.abort();
+    dropLoading(reason: unknown) {
+      loading?.abort(reason);
     },
-    dropAll() {
-      loading?.abort();
-      owner?.attempt.abort();
+    dropAll(reason: unknown) {
+      loading?.abort(reason);
+      owner?.attempt.abort(reason);
     },
   };
 }

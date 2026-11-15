@@ -126,14 +126,22 @@ describe('resolve', () => {
     const { cache, fetchRsc } = serve({});
     const outcome = await resolve(
       request('/a', {
-        source: { kind: 'response', response: Promise.resolve(page('/a')) },
+        source: {
+          kind: 'response',
+          response: Promise.resolve(page('/a')),
+          follows: 1,
+        },
       }),
       shown('/'),
       cache,
       live(),
     );
     expect(fetchRsc).not.toHaveBeenCalled();
-    expect(outcome).toMatchObject({ kind: 'render', route: route('/a') });
+    expect(outcome).toMatchObject({
+      kind: 'render',
+      route: route('/a'),
+      origin: { follows: 1 },
+    });
   });
 
   test('the follows already made are carried into the result', async () => {
