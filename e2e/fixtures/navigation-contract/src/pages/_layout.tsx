@@ -1,0 +1,59 @@
+import type { ReactNode } from 'react';
+import { Link } from 'waku';
+import { ActionPanel, Hydrated, RouteProbe } from '../components/probes.js';
+
+const gatedIds = ['t01', 't05', 't06', 't06b'];
+const gatedChildIds = ['t04'];
+
+export default function Layout({ children }: { children: ReactNode }) {
+  return (
+    <div>
+      <title>navigation-contract</title>
+      <nav>
+        <Link to="/" data-testid="go-home">
+          Home
+        </Link>
+        <Link to="/plain" data-testid="go-plain">
+          Plain
+        </Link>
+        <Link to="/counter" data-testid="go-counter">
+          Counter
+        </Link>
+        <Link to="/old" data-testid="go-old">
+          Old
+        </Link>
+        {/* No such page exists, so the typed routes do not include it. */}
+        <Link to={'/missing' as never} data-testid="go-missing">
+          Missing
+        </Link>
+        <Link to="/fragment#target" data-testid="go-fragment">
+          Fragment
+        </Link>
+        {gatedIds.map((id) => (
+          <Link
+            key={id}
+            to={`/gated?gate=${id}`}
+            data-testid={`go-gated-${id}`}
+          >
+            Gated {id}
+          </Link>
+        ))}
+        {gatedChildIds.map((id) => (
+          <Link
+            key={id}
+            to={`/gated-child?gate=${id}`}
+            data-testid={`go-gated-child-${id}`}
+          >
+            Gated child {id}
+          </Link>
+        ))}
+      </nav>
+      <Hydrated />
+      <RouteProbe />
+      <ActionPanel />
+      {children}
+    </div>
+  );
+}
+
+export const getConfig = () => ({ render: 'static' }) as const;
