@@ -7,8 +7,9 @@ import {
   RouteProbe,
 } from '../components/probes.js';
 
-const gatedIds = ['t01', 't05', 't06', 't06b'];
+const gatedIds = ['t01b', 't05b', 't06', 't06b', 'g2'];
 const gatedChildIds = ['t04'];
+const heldRequestIds = ['t01', 't05'];
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
@@ -44,6 +45,15 @@ export default function Layout({ children }: { children: ReactNode }) {
             data-testid={`go-gated-${id}`}
           >
             Gated {id}
+          </Link>
+        ))}
+        {heldRequestIds.map((id) => (
+          <Link
+            key={id}
+            to={`/held-request?hold=${id}`}
+            data-testid={`go-held-request-${id}`}
+          >
+            Held request {id}
           </Link>
         ))}
         {gatedChildIds.map((id) => (

@@ -33,6 +33,7 @@ export function RouteIntent({
   const router = use(RouterContext);
   const cache = useRouterCache();
   const getElements = router?.getElements;
+  const getState = router?.getRouteState ?? getRouterState;
   const handledIntents = useRef(new WeakSet<PromiseLike<string | undefined>>());
   const mounted = useRef(true);
   useEffect(() => {
@@ -54,7 +55,7 @@ export function RouteIntent({
         return;
       }
       handledIntents.current.add(pending);
-      const state = getRouterState(source);
+      const state = getState(source);
       try {
         const sourceRoute = getRouteFromElements(source);
         const requestedUrl = new URL(
@@ -112,7 +113,7 @@ export function RouteIntent({
       return;
     }
     const unregister = cache.connectRouteIntentObserver((signal) => {
-      const scope = getRouterState(getElements());
+      const scope = getState(getElements());
       return (responseElements) => {
         const pending = responseElements[INTENT_ID] as
           PromiseLike<string | undefined> | null | undefined;
@@ -126,7 +127,7 @@ export function RouteIntent({
           if (
             mounted.current &&
             !signal?.aborted &&
-            getRouterState(getElements()) === scope
+            getState(getElements()) === scope
           ) {
             settle(outcome, getElements(), pending);
           }
@@ -139,7 +140,7 @@ export function RouteIntent({
     return () => {
       unregister();
     };
-  }, [cache, getElements]);
+  }, [cache, getElements, getState]);
 
   return null;
 }

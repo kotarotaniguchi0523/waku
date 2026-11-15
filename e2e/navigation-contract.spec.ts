@@ -54,17 +54,30 @@ test.describe('navigation-contract', () => {
     await expect(page.getByTestId('route-path')).toHaveText('/plain');
   });
 
-  test('T01: while the destination is held, the address bar and content stay; then both move', async ({
+  test('T01: while the request for the destination is held, the address bar and content stay; then both move', async ({
     page,
   }) => {
     await open(page, '/');
-    await page.getByTestId('go-gated-t01').click();
+    await page.getByTestId('go-held-request-t01').click();
     await waitUntilHeld(page, 't01');
     await expect(page).toHaveURL(`${origin()}/`);
     await expect(shownPage(page)).toHaveText('home');
     await releaseGate(page, 't01');
+    await expect(shownPage(page)).toHaveText('held-request');
+    await expect(page).toHaveURL(`${origin()}/held-request?hold=t01`);
+  });
+
+  test('T01: once the destination has responded, the address bar moves while the old content stays until the new is ready', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-gated-t01b').click();
+    await waitUntilHeld(page, 't01b');
+    await expect(page).toHaveURL(`${origin()}/gated?gate=t01b`);
+    await expect(shownPage(page)).toHaveText('home');
+    await releaseGate(page, 't01b');
     await expect(shownPage(page)).toHaveText('gated');
-    await expect(page).toHaveURL(`${origin()}/gated?gate=t01`);
+    await expect(page).toHaveURL(`${origin()}/gated?gate=t01b`);
   });
 
   test('T02: a redirect lands on the final URL and Back skips the redirecting URL', async ({
@@ -106,18 +119,36 @@ test.describe('navigation-contract', () => {
     await expect(page).toHaveURL(`${origin()}/counter`);
   });
 
-  test('T05: Back during a held navigation returns to the previous page and the held one never appears', async ({
+  test('T05: Back while the request is held returns to the previous entry and the held page never appears', async ({
     page,
   }) => {
     await open(page, '/');
     await page.getByTestId('go-plain').click();
     await expect(shownPage(page)).toHaveText('plain');
-    await page.getByTestId('go-gated-t05').click();
+    await page.getByTestId('go-held-request-t05').click();
     await waitUntilHeld(page, 't05');
     await page.goBack();
     await expect(shownPage(page)).toHaveText('home');
     await expect(page).toHaveURL(`${origin()}/`);
     await releaseGate(page, 't05');
+    await page.getByTestId('go-counter').click();
+    await expect(shownPage(page)).toHaveText('counter');
+    await expect(page).toHaveURL(`${origin()}/counter`);
+  });
+
+  test('T05: Back after the address bar moved returns to the page still on screen and the held page never appears', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-plain').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await page.getByTestId('go-gated-t05b').click();
+    await waitUntilHeld(page, 't05b');
+    await expect(page).toHaveURL(`${origin()}/gated?gate=t05b`);
+    await page.goBack();
+    await expect(page).toHaveURL(`${origin()}/plain`);
+    await expect(shownPage(page)).toHaveText('plain');
+    await releaseGate(page, 't05b');
     await page.getByTestId('go-counter').click();
     await expect(shownPage(page)).toHaveText('counter');
     await expect(page).toHaveURL(`${origin()}/counter`);
@@ -145,7 +176,9 @@ test.describe('navigation-contract', () => {
   test('T06: when a held navigation is abandoned, an action update made meanwhile is shown', async ({
     page,
   }) => {
-    await open(page, '/counter');
+    await open(page, '/');
+    await page.getByTestId('go-counter').click();
+    await expect(shownPage(page)).toHaveText('counter');
     const before = Number(await page.getByTestId('count').textContent());
     await page.getByTestId('go-gated-t06b').click();
     await waitUntilHeld(page, 't06b');
@@ -153,18 +186,32 @@ test.describe('navigation-contract', () => {
     await expect(page.getByTestId('action-result')).toHaveText(
       String(before + 1),
     );
-    // A fragment-only change is a newer navigation that stays on this page.
-    await page.evaluate(() => {
-      location.hash = 'later';
-    });
+    await page.goBack();
+    await expect(page).toHaveURL(`${origin()}/counter`);
+    await expect(shownPage(page)).toHaveText('counter');
     await expect(page.getByTestId('count')).toHaveText(String(before + 1));
-    await expect(page).toHaveURL(`${origin()}/counter#later`);
     await releaseGate(page, 't06b');
     // A refresh round trip gives the abandoned response time to arrive.
     await page.getByTestId('run-increment').click();
     await expect(page.getByTestId('count')).toHaveText(String(before + 2));
     await expect(shownPage(page)).toHaveText('counter');
-    await expect(page).toHaveURL(`${origin()}/counter#later`);
+    await expect(page).toHaveURL(`${origin()}/counter`);
+  });
+
+  test('a fragment change after the address bar moved does not strand the old content', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-gated-g2').click();
+    await waitUntilHeld(page, 'g2');
+    await expect(page).toHaveURL(`${origin()}/gated?gate=g2`);
+    await page.evaluate(() => {
+      location.hash = 'later';
+    });
+    await expect(page).toHaveURL(`${origin()}/gated?gate=g2#later`);
+    await releaseGate(page, 'g2');
+    await expect(shownPage(page)).toHaveText('gated');
+    await expect(page.getByTestId('route-hash')).toHaveText('#later');
   });
 
   test('T07: an action that finishes after leaving its page returns its value and leaves the new page alone', async ({

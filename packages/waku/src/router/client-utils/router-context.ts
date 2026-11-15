@@ -1,6 +1,7 @@
 import { createContext, startTransition } from 'react';
 import type { TransitionFunction } from 'react';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
+import type { RouterState } from './router-state.js';
 
 export type ChangeRouteOptions = {
   shouldScroll: boolean;
@@ -26,6 +27,10 @@ export const RouterContext = createContext<{
   isCurrentRoute?: (
     source: Readonly<Record<string | symbol, unknown>>,
   ) => boolean;
+  /** The request an element record was committed for, when the router tracks it outside the record. */
+  getRouteState?: (
+    source: Readonly<Record<string | symbol, unknown>>,
+  ) => RouterState | undefined;
 } | null>(null);
 
 export function dispatchChangeRoute(
