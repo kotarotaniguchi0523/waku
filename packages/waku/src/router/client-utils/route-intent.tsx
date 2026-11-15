@@ -102,14 +102,11 @@ export function RouteIntent({
         const { target, url } = decision;
         startTransition(() => {
           router
-            .changeRoute(target, {
-              shouldScroll: origin
-                ? origin.scroll
-                : target.path !== sourceRoute?.path,
-              history: 'replace',
+            .followIntent?.(
+              target,
               url,
-              follows: (origin?.follows ?? 0) + 1,
-            })
+              origin ? origin.scroll : target.path !== sourceRoute?.path,
+            )
             .catch(onError);
         });
       } catch (error) {

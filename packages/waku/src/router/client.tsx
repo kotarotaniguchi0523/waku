@@ -30,7 +30,6 @@ import type { ServerFunctionRouting } from './client-core-utils/server-function-
 import { createServerFunctionRouting } from './client-core-utils/server-function-routing.js';
 import { errorOf, initialFrame } from './client-utils/frame.js';
 import type { Elements, RenderFrame } from './client-utils/frame.js';
-import { useNavigation } from './client-utils/navigation.js';
 import {
   MissingRouteHandler,
   RenderError,
@@ -46,6 +45,7 @@ import {
 } from './client-utils/router-context.js';
 import { shouldScrollByDefault } from './client-utils/scroll.js';
 import { serverRedirectEnhancer } from './client-utils/server-redirect.js';
+import { useNavigation } from './client-utils/use-navigation.js';
 import type { NavigationHref } from './isomorphic-utils/build-route-href.js';
 import type { RouteProps } from './isomorphic-utils/route-path.js';
 import {
@@ -321,6 +321,7 @@ const InnerRouter = ({
         route: currentRoute,
         changeRoute,
         getElements: navigation.getElements,
+        followIntent: navigation.followIntent,
         getOrigin: navigation.getOrigin,
         getScope: navigation.getScope,
         isCurrentScope: navigation.isCurrentScope,

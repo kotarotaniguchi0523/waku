@@ -15,17 +15,21 @@ Six rules describe the client router. Read them before changing it.
 
 ## Reading order
 
-A normal navigation is these four files, about 500 lines of code:
+A normal navigation is these files:
 
-1. `client-utils/navigation.ts`: the `navigate` listener. It starts an
-   attempt, resolves the route once, and queues the frame that shows the
-   result. The same promise is awaited before the URL moves (push, replace)
-   and after (Back, Forward, reload).
+1. `client-utils/navigate-listener.ts`: what happens on a `navigate` event.
+   It starts an attempt, resolves the route once, and shows the result. The
+   same promise is awaited before the URL moves (push, replace) and after
+   (Back, Forward, reload).
 2. `client-utils/resolve.ts`: request to outcome. It fetches and follows the
    route and touches neither the browser nor React.
 3. `client-utils/frame.ts`: `RenderFrame` and the functions that produce the
    next frame from the previous one and an outcome. All pure.
 4. `client-utils/attempts.ts`: which navigations can still change the screen.
+5. `client-utils/navigation.ts`: the binding that holds these together. It
+   queues frames, applies updates that move nothing in the browser, and is
+   what the rest of the router calls. `use-navigation.ts` creates it and
+   reports each commit to it; `request.ts` has the types they share.
 
 Then, as needed:
 
@@ -37,11 +41,12 @@ Then, as needed:
 - `client-utils/route-intent.tsx`: redirects and not-found that settle after
   their page is shown.
 
-Each of these is used from one place in `navigation.ts` and can be read on
-its own: `instant-preview.ts` (instant navigation), `traversal-guard.ts`
-(refusing Back and Forward), `handoff.ts` (leaving for a document load),
-`scroll.ts` (a fragment target that renders late). Prefetching and SSR are
-separate as well.
+Each of these is used from one place and can be read on its own:
+`browser-owned.ts` (navigations the router leaves alone),
+`instant-preview.ts` (instant navigation), `traversal-guard.ts` (refusing
+Back and Forward), `handoff.ts` (leaving for a document load), `scroll.ts`
+(a fragment target that renders late). Prefetching and SSR are separate as
+well.
 
 ## State
 
@@ -58,6 +63,11 @@ so a combination that cannot happen cannot be written:
 Code that needs a field switches on `kind`; add a shape and the compiler
 points at every place that has to decide about it. Frames are created only by
 the functions in `frame.ts`.
+
+A navigation's result comes from one of three sources, also a union
+(`request.ts`): it is fetched, it adopts a response already on its way, or it
+was resolved by the navigation it replaces. Callers of `changeRoute` cannot
+set these.
 
 An attempt is in one of two slots. `loading` has not moved the URL and is
 dropped by any newer navigation. `owner` has moved the URL and is replaced
