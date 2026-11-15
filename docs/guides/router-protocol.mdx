@@ -378,7 +378,8 @@ The standard client is built on the Navigation API. The browser owns the URL,
 history entries, scroll restoration, and focus; the router listens for the
 `navigate` event, loads the destination, and renders it. It needs a browser
 with `navigation` and `precommitHandler`, and does not write history or
-scroll on its own.
+scroll on its own, apart from a fragment target that renders late (see
+**shell committed** below).
 
 The displayed route and the elements live in one piece of React state that the
 router holds above a controlled Minimal Root. A navigation replaces both in one
@@ -408,7 +409,10 @@ A navigation passes through these points:
    async transition.
 5. **shell committed**: a layout effect reports the commit, the intercept
    handler returns, and the browser scrolls, resets focus, and fires
-   `navigatesuccess`.
+   `navigatesuccess`. If a push or replace that scrolls names a fragment
+   whose target has not rendered yet, for example inside `<Suspense>`, the
+   router scrolls to it once it appears within two seconds, unless another
+   navigation starts or the page is scrolled first.
 
 Once a navigation has moved the URL, only a later navigation that moves the
 URL can drop it. A fragment change, or a newer navigation that is cancelled

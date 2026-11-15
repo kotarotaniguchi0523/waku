@@ -46,7 +46,10 @@ import { dispatchChangeRoute } from './router-context.js';
 import type { ChangeRoute, ChangeRouteOptions } from './router-context.js';
 import { createRouterState, resolveServerRedirect } from './router-state.js';
 import type { RouterState } from './router-state.js';
-import { shouldScrollForRouteChange } from './scroll.js';
+import {
+  scrollToHashWhenRendered,
+  shouldScrollForRouteChange,
+} from './scroll.js';
 
 type Elements = Readonly<Record<string | symbol, unknown>>;
 
@@ -798,7 +801,23 @@ export function useNavigation(
         } else {
           info?.settle.resolve();
         }
+        // Read while this navigation is still the browser's current one.
+        const transition = event.signal.aborted
+          ? undefined
+          : navigation.transition;
         await committed;
+        if (
+          prepared.kind === 'render' &&
+          options.shouldScroll &&
+          (event.navigationType === 'push' ||
+            event.navigationType === 'replace')
+        ) {
+          // After the browser's own scroll, which a late target missed.
+          transition?.finished.then(
+            () => scrollToHashWhenRendered(committedRef.current.route.hash),
+            () => {},
+          );
+        }
       };
 
       const behavior = options.shouldScroll

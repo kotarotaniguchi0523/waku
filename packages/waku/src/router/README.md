@@ -29,7 +29,10 @@ change touches them.
 ## What must stay true
 
 - The router never writes history or scrolls. A navigation it wants goes
-  through `navigation.navigate()`.
+  through `navigation.navigate()`. The exception is a fragment target that
+  renders after the navigation finished: the router scrolls to it once if it
+  appears within two seconds, unless another navigation starts or the page
+  is scrolled first.
 - One commit never shows a route with elements from another frame.
 - The intercepted navigation finishes when React commits the frame's shell,
   not when every streamed part has arrived.

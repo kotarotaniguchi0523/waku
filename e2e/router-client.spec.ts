@@ -538,6 +538,95 @@ test.describe('router-client', () => {
     expect(lastScrollToCall?.top).toBeGreaterThan(100);
   });
 
+  test.describe('fragment target that renders after the page is shown', () => {
+    const expectPageShown = async (page: Page, hash: string) => {
+      await expect(
+        page.getByRole('heading', { name: 'Late Hash' }),
+      ).toBeVisible();
+      await expect(page.getByTestId('route-hash')).toHaveText(hash);
+      await expect(page).toHaveURL(new RegExp(`/late-hash${hash}$`));
+    };
+    const targetTop = (page: Page, id: string) =>
+      page.getByTestId(id).evaluate((element) => {
+        return element.getBoundingClientRect().top;
+      });
+
+    test('is scrolled to once it appears', async ({ page }) => {
+      await page.goto(`http://localhost:${port}/start`);
+      await waitForHydration(page);
+
+      await page.getByTestId('go-late-soon').dispatchEvent('click');
+      await expectPageShown(page, '#late-soon');
+      await expect(page.getByTestId('late-soon')).toBeAttached();
+      const { top } = await settledScroll(page);
+      expect(top).toBeGreaterThan(100);
+      expect(Math.abs(await targetTop(page, 'late-soon'))).toBeLessThanOrEqual(
+        1,
+      );
+    });
+
+    test('is not scrolled to by a navigation with scroll: false', async ({
+      page,
+    }) => {
+      await page.goto(`http://localhost:${port}/start`);
+      await waitForHydration(page);
+      await installScrollToRecorder(page);
+
+      await page.getByTestId('go-late-soon-no-scroll').dispatchEvent('click');
+      await expectPageShown(page, '#late-soon');
+      await expect(page.getByTestId('late-soon')).toBeAttached();
+      expect(await getScrollToCalls(page)).toHaveLength(0);
+    });
+
+    test('is not scrolled to after the wait times out', async ({ page }) => {
+      await page.goto(`http://localhost:${port}/start`);
+      await waitForHydration(page);
+      await installScrollToRecorder(page);
+
+      await page.getByTestId('go-late-never').dispatchEvent('click');
+      await expectPageShown(page, '#late-never');
+      await expect(page.getByTestId('late-never')).toBeAttached({
+        timeout: 10_000,
+      });
+      expect(await getScrollToCalls(page)).toHaveLength(0);
+    });
+
+    test('is not scrolled to after the user scrolls', async ({ page }) => {
+      await page.goto(`http://localhost:${port}/start`);
+      await waitForHydration(page);
+
+      await page.getByTestId('go-late-slow').dispatchEvent('click');
+      await expectPageShown(page, '#late-slow');
+      await expect(page.getByTestId('late-slow')).not.toBeAttached();
+      await page.mouse.move(100, 100);
+      await page.mouse.wheel(0, 300);
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(300);
+      await installScrollToRecorder(page);
+
+      await expect(page.getByTestId('late-slow')).toBeAttached();
+      expect(await getScrollToCalls(page)).toHaveLength(0);
+    });
+
+    test('is not scrolled to after another navigation starts', async ({
+      page,
+    }) => {
+      await page.goto(`http://localhost:${port}/start`);
+      await waitForHydration(page);
+
+      await page.getByTestId('go-late-slow').dispatchEvent('click');
+      await expectPageShown(page, '#late-slow');
+      await expect(page.getByTestId('late-slow')).not.toBeAttached();
+      await installScrollToRecorder(page);
+      await page.evaluate(() => {
+        window.location.hash = '#missing';
+      });
+      await expect(page.getByTestId('route-hash')).toHaveText('#missing');
+
+      await expect(page.getByTestId('late-slow')).toBeAttached();
+      expect(await getScrollToCalls(page)).toHaveLength(0);
+    });
+  });
+
   test('route fetch sends the cached etags header', async ({ page }) => {
     await page.goto(`http://localhost:${port}/start`);
     await waitForHydration(page);
