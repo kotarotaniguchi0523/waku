@@ -19,8 +19,8 @@ import {
   INTENT_ID,
   getRouteFromElements,
 } from '../isomorphic-utils/router-protocol.js';
+import type { Scope } from './frame.js';
 import { RouterContext } from './router-context.js';
-import type { RouteScope } from './router-context.js';
 
 type PendingIntent = PromiseLike<string | undefined>;
 
@@ -59,7 +59,7 @@ export function RouteIntent({
     (
       outcome: RouteIntentOutcome,
       pending: PendingIntent,
-      scope: RouteScope | undefined,
+      scope: Scope | undefined,
       partial: boolean,
     ) => {
       if (!router || !getElements) {
@@ -76,20 +76,20 @@ export function RouteIntent({
         return;
       }
       handledIntents.current.add(pending);
-      const state = router.getRouteState?.();
+      const origin = router.getOrigin?.();
       try {
         const sourceRoute = getRouteFromElements(source);
         const requestedUrl = new URL(
-          state?.url ?? window.location.href,
+          origin?.url ?? window.location.href,
           window.location.href,
         );
-        const requested = state?.requested;
+        const requested = origin?.requested;
         const attempt = {
           route: requested
             ? { path: requested[0], query: requested[1] }
             : (sourceRoute ?? parseRoute(requestedUrl)),
           url: requestedUrl,
-          follows: state?.follows ?? 0,
+          follows: origin?.follows ?? 0,
         };
         const decision = getRouteIntentDecision(outcome, source, attempt);
         if (!decision) {
@@ -103,12 +103,12 @@ export function RouteIntent({
         startTransition(() => {
           router
             .changeRoute(target, {
-              shouldScroll: state
-                ? state.scroll !== null
+              shouldScroll: origin
+                ? origin.scroll
                 : target.path !== sourceRoute?.path,
               history: 'replace',
               url,
-              follows: (state?.follows ?? 0) + 1,
+              follows: (origin?.follows ?? 0) + 1,
             })
             .catch(onError);
         });

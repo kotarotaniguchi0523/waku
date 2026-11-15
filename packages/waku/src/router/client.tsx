@@ -28,8 +28,9 @@ import {
 } from './client-core-utils/route-url.js';
 import type { ServerFunctionRouting } from './client-core-utils/server-function-routing.js';
 import { createServerFunctionRouting } from './client-core-utils/server-function-routing.js';
+import { errorOf, initialFrame } from './client-utils/frame.js';
+import type { Elements, RenderFrame } from './client-utils/frame.js';
 import { useNavigation } from './client-utils/navigation.js';
-import type { RenderFrame } from './client-utils/navigation.js';
 import {
   MissingRouteHandler,
   RenderError,
@@ -43,8 +44,8 @@ import {
   RouterContext,
   dispatchChangeRoute,
 } from './client-utils/router-context.js';
-import { serverRedirectEnhancer } from './client-utils/router-state.js';
 import { shouldScrollByDefault } from './client-utils/scroll.js';
+import { serverRedirectEnhancer } from './client-utils/server-redirect.js';
 import type { NavigationHref } from './isomorphic-utils/build-route-href.js';
 import type { RouteProps } from './isomorphic-utils/route-path.js';
 import {
@@ -247,8 +248,6 @@ const getRouterRscEnhancers = (enhancers: readonly Unstable_RscEnhancer[]) => {
   return pipeline;
 };
 
-type Elements = Readonly<Record<string | symbol, unknown>>;
-
 const InnerRouter = ({
   frame,
   setFrame,
@@ -263,15 +262,7 @@ const InnerRouter = ({
   routeInterceptor: ((route: RouteProps) => RouteProps | false) | undefined;
 }) => {
   const elements = use(frame.elements);
-  const {
-    route: currentRoute,
-    connect,
-    changeRoute,
-    getElements,
-    getRouteState,
-    getScope,
-    isCurrentScope,
-  } = useNavigation(
+  const { route: currentRoute, navigation } = useNavigation(
     frame,
     setFrame,
     elements,
@@ -287,14 +278,17 @@ const InnerRouter = ({
   }>();
   const onIntentError = useCallback(
     (error: unknown) => {
-      setIntentError({ error, navigation: getScope().navigation });
+      setIntentError({ error, navigation: navigation.getScope().navigation });
     },
-    [getScope],
+    [navigation],
   );
   const error =
-    frame.error ??
-    (intentError?.navigation === frame.commitId ? intentError : undefined);
+    errorOf(frame) ??
+    (intentError?.navigation === frame.scope.navigation
+      ? intentError
+      : undefined);
 
+  const { changeRoute } = navigation;
   const navigate = useCallback<RouterHost['navigate']>(
     async (href, opts) => {
       const url = new URL(href, window.location.href);
@@ -326,14 +320,14 @@ const InnerRouter = ({
       value={{
         route: currentRoute,
         changeRoute,
-        getElements,
-        getRouteState,
-        getScope,
-        isCurrentScope,
+        getElements: navigation.getElements,
+        getOrigin: navigation.getOrigin,
+        getScope: navigation.getScope,
+        isCurrentScope: navigation.isCurrentScope,
       }}
     >
       <RouterHostContext value={host}>
-        <Connect connect={connect} />
+        <Connect connect={navigation.connect} />
         <RouteIntent onError={onIntentError} />
         <MissingRouteHandler>
           {rootAvailable ? <Slot id="root">{routeElement}</Slot> : routeElement}
@@ -401,13 +395,9 @@ export function Router({
     initialRscParams,
     rscEnhancers,
   );
-  const [frame, setFrame] = useState<RenderFrame>(() => ({
-    route: undefined,
-    elements: initial.elements,
-    commitId: 0,
-    state: undefined,
-    error: undefined,
-  }));
+  const [frame, setFrame] = useState<RenderFrame>(() =>
+    initialFrame(initial.elements),
+  );
   const [updateElements] = useState(
     () => (update: (prev: Promise<Elements>) => Promise<Elements>) =>
       setFrame((prev) => ({ ...prev, elements: update(prev.elements) })),

@@ -1,31 +1,19 @@
 import {
   startTransition,
-  useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
+  useState,
 } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import {
-  unstable_combineElements as combineElements,
-  unstable_isBuildIdMismatch as isBuildIdMismatch,
-  unstable_isImmutableElement as isImmutableElement,
-  useRegisterRscReloadListener_UNSTABLE as useRegisterRscReloadListener,
-} from 'waku/minimal/client';
-import {
-  createRscParams,
-  useRouterCache,
-} from '../client-core-utils/caches.js';
+import { useRegisterRscReloadListener_UNSTABLE as useRegisterRscReloadListener } from 'waku/minimal/client';
+import { useRouterCache } from '../client-core-utils/caches.js';
+import type { RouterCache } from '../client-core-utils/caches.js';
 import { useHmrRefetch } from '../client-core-utils/hmr.js';
 import { useInitialRoute } from '../client-core-utils/initial-route.js';
-import { rejectOnAbort } from '../client-core-utils/load.js';
-import { buildMergePatch } from '../client-core-utils/merge-patch.js';
 import {
   getRouteUrl,
   isSameOrigin,
-  isSameRoute,
-  isSameRscRoute,
   otherOriginError,
   parseRoute,
 } from '../client-core-utils/route-url.js';
@@ -33,108 +21,65 @@ import type { ServerFunctionRouting } from '../client-core-utils/server-function
 import { useServerFunctionRouting } from '../client-core-utils/server-function-routing.js';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
 import {
-  INTENT_ID,
-  IS_STATIC_ID,
-  ROUTE_ID,
-  encodeRoutePath,
   getRouteFromElements,
   has404FromElements,
-  isMetaKey,
   isStaticFromElements,
 } from '../isomorphic-utils/router-protocol.js';
+import { createAttempts } from './attempts.js';
+import type { Attempt } from './attempts.js';
+import {
+  failedHere,
+  nextFrame,
+  originOfFrame,
+  routeOf,
+  withFragment,
+  withRerender,
+} from './frame.js';
+import type { Elements, Outcome, RenderFrame, Scope, Shown } from './frame.js';
+import { HANDOFF, handOff } from './handoff.js';
+import { startPreview } from './instant-preview.js';
+import { abortError, ignoreRejection, isAbortError } from './promises.js';
+import { resolve } from './resolve.js';
+import type { Displayed, Request } from './resolve.js';
 import { dispatchChangeRoute } from './router-context.js';
-import type {
-  ChangeRoute,
-  ChangeRouteOptions,
-  RouteScope,
-} from './router-context.js';
-import { createRouterState, resolveServerRedirect } from './router-state.js';
-import type { RouterState } from './router-state.js';
+import type { ChangeRoute, ChangeRouteOptions } from './router-context.js';
 import {
   scrollToHashWhenRendered,
   shouldScrollForRouteChange,
 } from './scroll.js';
+import { acceptReturn, guardTraversal } from './traversal-guard.js';
 
-type Elements = Readonly<Record<string | symbol, unknown>>;
+type Interceptor = ((route: RouteProps) => RouteProps | false) | undefined;
 
-/**
- * The one piece of React state the router renders from: the displayed route
- * and the elements that belong to it change in the same update.
- */
-export type RenderFrame = {
-  /** `undefined` until the first navigation; the initial route shows then. */
-  route: RouteProps | undefined;
-  elements: Promise<Elements>;
-  /** Identifies the navigation whose commit the browser is waiting for. */
-  commitId: number;
-  /** The request this frame came from; its identity scopes late intents. */
-  state: RouterState | undefined;
-  error: { error: unknown } | undefined;
-};
-
-type Prepared =
-  | {
-      kind: 'render';
-      route: RouteProps;
-      url: URL;
-      state: RouterState;
-      /** What the response contributed, for a navigation that adopts it. */
-      patch: Elements;
-      /** Applies this result to the newest elements; pure. */
-      merge: (current: Elements, settled: RouteProps) => Elements;
-      /** Whether the result carries a response fetched for it. */
-      fetched: boolean;
-    }
-  | { kind: 'failed'; route: RouteProps; url: URL; error: unknown }
-  | { kind: 'leave'; location: URL }
-  | { kind: 'reload'; url: URL };
-
-type Attempt = {
-  id: number;
-  controller: AbortController;
-  signal: AbortSignal;
-  target: Pick<RouteProps, 'path' | 'query'>;
-  /**
-   * Whether the browser URL already belongs to this attempt. Until then a
-   * newer navigation cancels it. Afterwards only a newer attempt that takes
-   * the URL itself does, so the content always catches up with the URL.
-   */
-  ownsUrl: boolean;
-  /**
-   * Resolved when React commits a frame of this attempt. There can be more
-   * than one: an instant navigation queues a preview and then its fill.
-   */
-  commitWaiters: Set<() => void>;
-  /** The route of the frame this attempt has queued, once it has one. */
-  accepted?: RouteProps;
+/** What the last commit showed. Decisions read this, never a render. */
+type Committed = Displayed & {
+  readonly frame: RenderFrame;
+  readonly cache: RouterCache;
+  readonly interceptor: Interceptor;
 };
 
 // Carried through `navigation.navigate()` so the navigate listener can tell
-// a navigation this router started, and with which options.
+// a navigation this router started, with which options, and whether its
+// result is already known.
 class RequestInfo {
   constructor(
     readonly route: RouteProps,
     readonly options: ChangeRouteOptions,
     readonly settle: PromiseWithResolvers<void>,
+    readonly carried: Extract<Outcome, { kind: 'render' }> | undefined,
   ) {}
 }
 
-// Marks the traversal that returns to the shown entry after a refused one.
-const RETURN = { wakuReturn: true } as const;
+const quiet = { scroll: 'manual', focusReset: 'manual' } as const;
 
-// Marks a navigation the router hands to the browser as a document load.
-const HANDOFF = { wakuHandoff: true } as const;
+const runNow = (update: () => void) => update();
 
-// A fragment-only navigation can move the entry while its route is loading.
-const withEntryHash = (route: RouteProps, url: URL): RouteProps => {
-  const entryUrl = window.navigation.currentEntry?.url;
-  if (!entryUrl) {
-    return route;
+// A dropped update is expected. Anything else would otherwise disappear
+// without a trace.
+const reportUnlessAborted = (error: unknown) => {
+  if (!isAbortError(error)) {
+    console.error('Error while applying a route update:', error);
   }
-  const entry = new URL(entryUrl);
-  return entry.pathname === url.pathname && entry.search === url.search
-    ? { ...route, hash: entry.hash }
-    : route;
 };
 
 // `<a rel="external">` opts a same-origin link out of client navigation, and
@@ -150,20 +95,445 @@ const isExternalLink = (element: Element | null | undefined) => {
   );
 };
 
-const runNow = (update: () => void) => update();
-
-// A result that only adds its patch on top of the newest elements.
-const withPatch = (patch: Elements) => ({
-  patch,
-  merge: (current: Elements) => combineElements(current, patch),
-  fetched: false,
+const toRequest = (
+  route: RouteProps,
+  url: URL,
+  options: ChangeRouteOptions,
+): Request => ({
+  route,
+  url,
+  scroll: options.shouldScroll,
+  follows: options.follows ?? 0,
+  refetch: options.refetch,
+  adopt: options.adopt,
 });
 
-const abortError = () => new DOMException('Navigation aborted', 'AbortError');
+/**
+ * The Navigation API binding. The browser owns the URL, history, scroll and
+ * focus; this listens for navigations, resolves each one with `resolve()`,
+ * and queues the frame that shows the result.
+ */
+function createNavigation(
+  setFrame: Dispatch<SetStateAction<RenderFrame>>,
+  first: Committed,
+  onAttemptStart: () => void,
+) {
+  let current = first;
+  const attempts = createAttempts();
 
-const ignoreRejection = (promise: Promise<unknown> | undefined) => {
-  promise?.catch(() => {});
-};
+  // React can run an updater more than once for the same previous frame;
+  // each run must return the same frame, and with it the same promise.
+  const update = (
+    schedule: (update: () => void) => void,
+    compute: (prev: RenderFrame) => RenderFrame,
+  ) => {
+    const results = new WeakMap<RenderFrame, RenderFrame>();
+    schedule(() => {
+      setFrame((prev) => {
+        let next = results.get(prev);
+        if (!next) {
+          next = compute(prev);
+          results.set(prev, next);
+        }
+        return next;
+      });
+    });
+  };
+
+  const start = (route: RouteProps): Attempt => {
+    onAttemptStart();
+    return attempts.start(route);
+  };
+
+  // Queues the frame for an outcome. The promise settles when React has
+  // committed that frame, or rejects when the attempt is dropped first.
+  const show = (
+    attempt: Attempt,
+    outcome: Shown,
+    // A transition keeps the current content until the new frame is ready.
+    // An instant preview is meant to replace it at once.
+    schedule: (update: () => void) => void = startTransition,
+  ): Promise<void> => {
+    if (attempt.signal.aborted) {
+      throw abortError();
+    }
+    const committed = Promise.withResolvers<void>();
+    attempt.signal.addEventListener('abort', () =>
+      committed.reject(abortError()),
+    );
+    ignoreRejection(committed.promise);
+    if (outcome.kind !== 'failed') {
+      attempt.queued = outcome.route;
+    }
+    update(schedule, (prev) =>
+      attempt.signal.aborted
+        ? prev
+        : nextFrame(prev, outcome, {
+            navigation: attempt.id,
+            settled: current.route,
+            entryUrl: window.navigation.currentEntry?.url ?? undefined,
+            committed: () => committed.resolve(),
+          }),
+    );
+    return committed.promise;
+  };
+
+  // An update that moves nothing in the browser: the same location with new
+  // content, as after a server function rerenders the route.
+  const applyInPlace = async (
+    route: RouteProps,
+    options: ChangeRouteOptions,
+  ) => {
+    const attempt = start(route);
+    attempts.own(attempt);
+    const url = options.url ?? new URL(window.location.href);
+    try {
+      const outcome = await resolve(
+        toRequest(route, url, options),
+        current,
+        current.cache,
+        attempt.signal,
+      );
+      if (outcome.kind === 'leave' || outcome.kind === 'reload') {
+        handOff(outcome, false);
+        return;
+      }
+      // A failed load becomes a failed frame, which the boundary shows.
+      ignoreRejection(show(attempt, outcome));
+    } catch (e) {
+      if (attempt.signal.aborted) {
+        options.onSuperseded?.();
+        return;
+      }
+      throw e;
+    }
+  };
+
+  // Asks the browser to navigate; the listener below takes it from there.
+  const navigate = (
+    route: RouteProps,
+    options: ChangeRouteOptions,
+    url: URL,
+    carried: RequestInfo['carried'],
+  ) => {
+    const settle = Promise.withResolvers<void>();
+    const result = window.navigation.navigate(url.href, {
+      history: options.history === 'replace' ? 'replace' : 'auto',
+      info: new RequestInfo(route, options, settle, carried),
+    });
+    // The router reports the outcome through `settle`.
+    ignoreRejection(result.committed);
+    ignoreRejection(result.finished);
+    return settle.promise;
+  };
+
+  const changeRoute: ChangeRoute = (route, options) => {
+    const url = options.url ?? getRouteUrl(route);
+    if (!isSameOrigin(url)) {
+      const error = otherOriginError(url);
+      update(runNow, (prev) =>
+        failedHere(prev, current.route, new URL(window.location.href), error),
+      );
+      return Promise.reject(error);
+    }
+    return options.history === null
+      ? applyInPlace(route, options)
+      : navigate(route, options, url, undefined);
+  };
+
+  const onNavigate = (event: NavigateEvent) => {
+    if (
+      event.info === HANDOFF ||
+      // React navigates to the current URL while a transition is pending,
+      // only to make the browser show that the page is busy.
+      event.info === 'react-transition' ||
+      !event.canIntercept ||
+      event.downloadRequest !== null ||
+      event.formData
+    ) {
+      return;
+    }
+    if (acceptReturn(event)) {
+      return;
+    }
+    if (isExternalLink(event.sourceElement)) {
+      // The author asked for a document load, for example to sign out.
+      return;
+    }
+    const info = event.info instanceof RequestInfo ? event.info : undefined;
+    if (event.hashChange) {
+      // The browser scrolls to the fragment unless the caller opted out;
+      // `currententrychange` below records the new hash.
+      if (info && !info.options.shouldScroll) {
+        event.intercept(quiet);
+      }
+      info?.settle.resolve();
+      return;
+    }
+    const push = event.navigationType === 'push';
+    const replace = event.navigationType === 'replace';
+    if (!info && event.destination.sameDocument && (push || replace)) {
+      // `history.pushState()` or `replaceState()` from other code: that
+      // code changed the URL for its own purposes and shows its own content.
+      return;
+    }
+    const url = new URL(event.destination.url);
+    const route = info?.route ?? parseRoute(url);
+    const showInstead = (decided: RouteProps) => {
+      ignoreRejection(
+        changeRoute(decided, {
+          shouldScroll: shouldScrollForRouteChange(decided, current.route),
+          history: 'replace',
+        }).catch(reportUnlessAborted),
+      );
+    };
+    if (guardTraversal(event, route, current.interceptor, showInstead)) {
+      return;
+    }
+    const options: ChangeRouteOptions = info?.options ?? {
+      // Back and Forward between entries that differ only in the query stay
+      // where the page is, like a query-only push.
+      shouldScroll:
+        event.navigationType !== 'traverse' ||
+        shouldScrollForRouteChange(route, current.route),
+      history: replace ? 'replace' : 'push',
+    };
+
+    const attempt = start(route);
+    event.signal.addEventListener('abort', () => {
+      // Once the URL has moved, only a later URL-taking navigation drops it.
+      if (attempts.isLoading(attempt)) {
+        attempt.abort();
+      }
+    });
+    attempt.signal.addEventListener('abort', () => {
+      options.onSuperseded?.();
+      // A superseded navigation counts as handled.
+      info?.settle.resolve();
+    });
+    const fail = (error: unknown) => {
+      if (info) {
+        info.settle.reject(error);
+      } else if (!attempt.signal.aborted) {
+        console.error('Error while navigating:', error);
+      }
+    };
+
+    // Push and replace wait for the result before the URL moves, so the
+    // address bar and the content change together and a redirect leaves no
+    // entry of its own. Back, Forward and reload have already moved.
+    const waitsBeforeCommit = event.cancelable && (push || replace);
+    const request = toRequest(route, url, options);
+    // With the destination's shell at hand, an instant navigation moves at
+    // once, shows the shell, and lets the response fill in the rest.
+    const instant =
+      options.instant && waitsBeforeCommit && !info?.carried
+        ? startPreview(request, current, current.cache, attempt.signal)
+        : undefined;
+    // The result is resolved once; both handlers below wait for it.
+    const outcome = info?.carried
+      ? Promise.resolve(info.carried)
+      : resolve(
+          instant ? { ...request, adopt: instant.response } : request,
+          current,
+          current.cache,
+          attempt.signal,
+        );
+    ignoreRejection(outcome);
+    let committedUrl = event.destination.url;
+
+    // Shows a result and reports it to the caller of `push()` / `replace()`.
+    const present = async (
+      result: Shown,
+      schedule?: (update: () => void) => void,
+    ) => {
+      const committed = show(attempt, result, schedule);
+      // The frame is queued and the URL has moved: the caller can go on.
+      if (result.kind === 'failed') {
+        fail(result.error);
+      } else {
+        info?.settle.resolve();
+      }
+      // Read while this navigation is still the browser's current one.
+      const transition = event.signal.aborted
+        ? undefined
+        : window.navigation.transition;
+      await committed;
+      if (
+        result.kind !== 'failed' &&
+        options.shouldScroll &&
+        (push || replace)
+      ) {
+        // After the browser's own scroll, which a late target missed.
+        transition?.finished.then(
+          () => scrollToHashWhenRendered(current.route.hash),
+          () => {},
+        );
+      }
+    };
+
+    // After the URL has moved: leave, replace the entry, or show.
+    const finish = async (display: (result: Shown) => Promise<void> | void) => {
+      const result = await outcome;
+      if (result.kind === 'leave' || result.kind === 'reload') {
+        handOff(result, push);
+      } else if (result.kind === 'render' && result.url.href !== committedUrl) {
+        // The response names another route than this entry asked for.
+        // Replace the entry with a navigation that shows that response.
+        ignoreRejection(
+          navigate(
+            result.route,
+            { shouldScroll: options.shouldScroll, history: 'replace' },
+            result.url,
+            result,
+          ),
+        );
+      } else {
+        await display(result);
+      }
+    };
+
+    event.intercept({
+      ...(options.shouldScroll ? {} : quiet),
+      ...(waitsBeforeCommit && !instant
+        ? {
+            precommitHandler: async (controller) => {
+              let result: Outcome;
+              try {
+                result = await outcome;
+              } catch (e) {
+                fail(e);
+                throw e;
+              }
+              if (result.kind === 'leave' || result.kind === 'reload') {
+                // Cancel this navigation first. A document navigation
+                // started while it is still being cancelled can be
+                // cancelled with it.
+                setTimeout(() => handOff(result, push));
+                throw abortError();
+              }
+              if (result.url.href !== committedUrl) {
+                controller.redirect(result.url.href);
+                committedUrl = result.url.href;
+              }
+            },
+          }
+        : {}),
+      handler: async () => {
+        attempts.own(attempt);
+        if (instant) {
+          const previewed = present(instant.preview, runNow);
+          finish((result) => ignoreRejection(show(attempt, result))).catch(
+            (e) => {
+              if (!attempt.signal.aborted) {
+                fail(e);
+              }
+            },
+          );
+          await previewed;
+          return;
+        }
+        try {
+          await finish(present);
+        } catch (e) {
+          fail(e);
+          throw e;
+        }
+      },
+    });
+  };
+
+  // Fragment-only navigations are not intercepted, so record their hash.
+  const onEntryChange = () => {
+    const entryUrl = window.navigation.currentEntry?.url;
+    if (!entryUrl) {
+      return;
+    }
+    const url = new URL(entryUrl);
+    const initial = { route: current.route, url: getRouteUrl(current.route) };
+    update(runNow, (prev) => withFragment(prev, initial, url));
+  };
+
+  return {
+    changeRoute,
+    /** Records what React committed. */
+    commit(committed: Committed) {
+      current = committed;
+      const { frame } = committed;
+      attempts.committed(frame.scope.navigation, frame.kind !== 'preview');
+      if (frame.kind !== 'failed') {
+        committed.cache.learnStaticFromElements(committed.elements);
+      }
+      if (frame.kind !== 'initial') {
+        // Lets the browser finish the navigation this frame belongs to.
+        frame.committed();
+      }
+    },
+    /**
+     * Starts listening to the browser. The caller runs this from the first
+     * layout effect under the router, so a navigation started by any other
+     * layout effect during mount is already seen.
+     */
+    connect() {
+      const { navigation } = window;
+      navigation.addEventListener('navigate', onNavigate);
+      navigation.addEventListener('currententrychange', onEntryChange);
+      return () => {
+        navigation.removeEventListener('navigate', onNavigate);
+        navigation.removeEventListener('currententrychange', onEntryChange);
+      };
+    },
+    disconnect: () => attempts.dropAll(),
+    getElements: () => current.elements,
+    getRoute: () => current.route,
+    getOrigin: () => originOfFrame(current.frame),
+    getScope: () => current.frame.scope,
+    /**
+     * Whether `scope` still describes what is on screen and no navigation is
+     * loading. With `exact`, a fragment change since then also ends it.
+     */
+    isCurrentScope(scope: Scope, exact: boolean) {
+      const shown = current.frame.scope;
+      return (
+        scope.navigation === shown.navigation &&
+        (!exact || scope.fragment === shown.fragment) &&
+        !attempts.pending(shown.navigation)
+      );
+    },
+    getPendingRoute: () =>
+      attempts.pending(current.frame.scope.navigation)?.target,
+    // During development a reload refetches the route the user is heading
+    // for: one already queued but not painted yet, or else the one shown.
+    getRefetchRoute: () => attempts.queuedRoute() ?? current.route,
+    // A navigation still waiting for its response was requested from code
+    // that has since changed; its response must not be shown.
+    dropLoading: () => attempts.dropLoading(),
+    // A server function's response that names a route.
+    async applyRouteResponse(response: Elements) {
+      const next = getRouteFromElements(response)!;
+      const shown = current.route;
+      const sameRoute =
+        shown.path === next.path &&
+        (isStaticFromElements(response) || shown.query === next.query);
+      const is404 = next.path === '/404';
+      await dispatchChangeRoute(changeRoute, sameRoute ? shown : next, {
+        adopt: Promise.resolve(response),
+        shouldScroll: false,
+        history: sameRoute || is404 ? null : 'push',
+        ...(is404 ? { url: new URL(window.location.href) } : {}),
+      }).catch(reportUnlessAborted);
+    },
+    // A server function rerendered the displayed route while a navigation
+    // is loading. The navigation goes on; the rerender joins the queued
+    // frames, so it is there if the user ends up on that route after all.
+    applyOriginRerender(response: Elements) {
+      const origin = current.route;
+      update(startTransition, (prev) =>
+        withRerender(prev, current.route, origin, response),
+      );
+    },
+  };
+}
 
 export function useNavigation(
   frame: RenderFrame,
@@ -171,426 +541,36 @@ export function useNavigation(
   elements: Elements,
   fallbackRoute: RouteProps,
   serverFunctionRouting: ServerFunctionRouting,
-  routeInterceptor: ((route: RouteProps) => RouteProps | false) | undefined,
+  interceptor: Interceptor,
 ) {
-  const routeInterceptorRef = useRef(routeInterceptor);
-  useLayoutEffect(() => {
-    routeInterceptorRef.current = routeInterceptor;
-  }, [routeInterceptor]);
   const cache = useRouterCache();
-  const initialRoute = useInitialRoute(fallbackRoute);
-  const route = frame.route ?? initialRoute;
+  const route = routeOf(frame, useInitialRoute(fallbackRoute));
   const has404 = has404FromElements(elements);
+  const committed: Committed = {
+    frame,
+    elements,
+    route,
+    has404,
+    cache,
+    interceptor,
+  };
 
   const registerRscReloadListener = useRegisterRscReloadListener();
-  useEffect(() => {
+  // Router owns the HMR target; keep Minimal's initial-path listener replaced.
+  const [keepReloadTarget] = useState(() => () => {
     if (import.meta.hot) {
-      // Router owns the HMR target; replace Minimal's initial-path listener.
       registerRscReloadListener(() => {}, { replace: true });
     }
-  }, [registerRscReloadListener]);
-
-  // What the last commit showed. Navigation decisions read this, never the
-  // render in progress.
-  const { commitId, error, state } = frame;
-  // Replaced for each navigation shown and for each fragment change.
-  const scope = useMemo(
-    (): RouteScope => ({ navigation: commitId, state }),
-    [commitId, state],
-  );
-  const committedRef = useRef({ elements, route, state, scope });
-  // The newest attempt that has not been shown or dropped yet.
-  const pendingRef = useRef<Attempt>(undefined);
-  const liveAttemptsRef = useRef(new Set<Attempt>());
-  // Set when a server function's refresh of this route arrived during a
-  // navigation and was therefore not applied. If that navigation ends up
-  // abandoned, the route is refetched so the refresh is not lost.
-  const refreshOwedRef = useRef(false);
-  const refreshAbandonedRef = useRef<() => void>(undefined);
-  const nextIdRef = useRef(0);
-  useLayoutEffect(() => {
-    committedRef.current = { elements, route, state, scope };
-    if (pendingRef.current?.id === commitId) {
-      pendingRef.current = undefined;
-    }
-    if (!error) {
-      cache.learnStaticFromElements(elements);
-    }
-    // Lets the browser finish the navigation this frame belongs to.
-    for (const attempt of liveAttemptsRef.current) {
-      if (attempt.id === commitId) {
-        for (const resolve of attempt.commitWaiters) {
-          resolve();
-        }
-        attempt.commitWaiters.clear();
-      }
-    }
-  }, [cache, elements, route, state, scope, commitId, error]);
-
-  const getElements = useCallback(() => committedRef.current.elements, []);
-  const getSettledRoute = useCallback(() => committedRef.current.route, []);
-  const getRouteState = useCallback(() => committedRef.current.state, []);
-  const getScope = useCallback(() => committedRef.current.scope, []);
-  const isCurrentScope = useCallback((captured: RouteScope, exact: boolean) => {
-    const current = committedRef.current.scope;
-    return (
-      (exact
-        ? captured === current
-        : captured.navigation === current.navigation) && !pendingRef.current
-    );
-  }, []);
-
-  // During development a reload refetches the route the user is heading
-  // for: one already accepted but not painted yet, or else the one shown.
-  const getRefetchRoute = useCallback(
-    () => pendingRef.current?.accepted ?? committedRef.current.route,
-    [],
-  );
-  // A navigation still waiting for its response was requested from code
-  // that has since changed; its response must not be shown.
-  const retireUnanswered = useCallback(() => {
-    for (const attempt of [...liveAttemptsRef.current]) {
-      if (!attempt.ownsUrl) {
-        attempt.controller.abort();
-      }
-    }
-  }, []);
-  useHmrRefetch({
-    getSettledRoute: getRefetchRoute,
-    onBeforeRefetch: retireUnanswered,
   });
+  useEffect(keepReloadTarget, [keepReloadTarget]);
 
-  // Fetches and follows the route. Touches neither the browser nor React.
-  const prepare = useCallback(
-    async (
-      attempt: Attempt,
-      nextRoute: RouteProps,
-      url: URL,
-      options: ChangeRouteOptions,
-    ): Promise<Prepared> => {
-      const committed = committedRef.current;
-      const settled = committed.route;
-      const base = committed.elements;
-      const follows = options.follows ?? 0;
-      const stateFor = (
-        target: { route: RouteProps; url: URL },
-        count: number,
-      ) =>
-        createRouterState(target.route, target.url, {
-          history: options.history,
-          scroll: options.shouldScroll,
-          pathChanged:
-            nextRoute.path !== settled.path ||
-            target.route.path !== settled.path,
-          follows: count,
-        });
-      const shouldRefetch =
-        options.adopt !== undefined ||
-        (options.refetch ??
-          (!isSameRscRoute(nextRoute, settled) || refreshOwedRef.current));
-      const canReuseStatic =
-        options.adopt === undefined &&
-        cache.canReuseStaticRoute(nextRoute, base);
-      if (canReuseStatic || !shouldRefetch) {
-        return {
-          kind: 'render',
-          route: nextRoute,
-          url,
-          state: stateFor({ route: nextRoute, url }, follows),
-          ...withPatch({
-            [ROUTE_ID]: [nextRoute.path, nextRoute.query],
-            [INTENT_ID]: isSameRscRoute(nextRoute, settled)
-              ? base[INTENT_ID]
-              : null,
-            ...(canReuseStatic ? { [IS_STATIC_ID]: true } : {}),
-          }),
-        };
-      }
-      // The request is cancelled only while nothing of it has been used.
-      // Once its response is handed to React, the stream runs to the end even
-      // if the attempt is dropped, since content on screen may read from it.
-      const request = new AbortController();
-      const cancelRequest = () => request.abort();
-      attempt.signal.addEventListener('abort', cancelRequest);
-      const outcome = await cache
-        .load(nextRoute, {
-          signal: request.signal,
-          refetch: shouldRefetch,
-          has404,
-          base,
-          url,
-          follows,
-          ...(options.adopt ? { adopt: options.adopt } : {}),
-        })
-        .finally(() => {
-          attempt.signal.removeEventListener('abort', cancelRequest);
-        });
-      if (outcome.type === 'aborted' || attempt.signal.aborted) {
-        throw abortError();
-      }
-      if (outcome.type === 'leave') {
-        return { kind: 'leave', location: outcome.location };
-      }
-      if (outcome.type === 'failed') {
-        return isBuildIdMismatch(outcome.error)
-          ? { kind: 'reload', url: outcome.url }
-          : {
-              kind: 'failed',
-              route: outcome.route,
-              url: outcome.url,
-              error: outcome.error,
-            };
-      }
-      const responsePatch: Elements =
-        outcome.type === 'reused'
-          ? {
-              [ROUTE_ID]: [outcome.route.path, outcome.route.query],
-              [INTENT_ID]: null,
-              [IS_STATIC_ID]:
-                cache.canReuseStaticRoute(outcome.route, base) ||
-                isStaticFromElements(base),
-            }
-          : outcome.elements;
-      // The response names the route the server rendered, which differs from
-      // the requested one after a redirect or for a custom 404.
-      const destination = resolveServerRedirect(
-        responsePatch,
-        stateFor(outcome, outcome.follows),
-        outcome.route.path,
-      );
-      attempt.target = destination.route;
-      return {
-        kind: 'render',
-        route: destination.route,
-        url: destination.url,
-        state: stateFor(destination, outcome.follows),
-        ...(outcome.type === 'loaded'
-          ? {
-              patch: responsePatch,
-              // An action can have merged newer values while this response
-              // was loading; those win.
-              merge: (current, shown) =>
-                combineElements(
-                  current,
-                  buildMergePatch(
-                    { route: outcome.route, elements: responsePatch },
-                    current,
-                    base,
-                    { settled: shown },
-                  ),
-                ),
-              fetched: true,
-            }
-          : withPatch(responsePatch)),
-      };
-    },
-    [cache, has404],
+  const [navigation] = useState(() =>
+    createNavigation(setFrame, committed, keepReloadTarget),
   );
+  useLayoutEffect(() => {
+    navigation.commit({ frame, elements, route, has404, cache, interceptor });
+  }, [navigation, frame, elements, route, has404, cache, interceptor]);
 
-  // Instant navigation: when the destination's shell is already held, show
-  // it at once with the parts that still need the server left pending, and
-  // let the response fill them in. Returns nothing when there is no shell.
-  const startPreview = useCallback(
-    (
-      attempt: Attempt,
-      nextRoute: RouteProps,
-      url: URL,
-      options: ChangeRouteOptions,
-    ) => {
-      const committed = committedRef.current;
-      const shown = committed.elements;
-      if (
-        options.adopt !== undefined ||
-        options.follows ||
-        options.refetch === false ||
-        isSameRscRoute(nextRoute, committed.route) ||
-        cache.canReuseStaticRoute(nextRoute, shown) ||
-        !cache.hasCachedShell(nextRoute, shown)
-      ) {
-        return;
-      }
-      const prefetched = cache.getPrefetchedElements(nextRoute);
-      const request = new AbortController();
-      const cancelRequest = () => request.abort();
-      attempt.signal.addEventListener('abort', cancelRequest);
-      const response = rejectOnAbort(
-        cache.getPrefetch(nextRoute)?.promise ??
-          cache.fetchRsc(
-            encodeRoutePath(nextRoute.path),
-            createRscParams(nextRoute.query),
-            {
-              signal: request.signal,
-              ...(prefetched ? { unstable_base: prefetched } : {}),
-            },
-          ),
-        request.signal,
-      );
-      response
-        .catch(() => {})
-        .finally(() => {
-          attempt.signal.removeEventListener('abort', cancelRequest);
-        });
-      const overlay: Elements = {
-        [ROUTE_ID]: [nextRoute.path, nextRoute.query],
-        [IS_STATIC_ID]: isStaticFromElements(shown),
-      };
-      const preview: Prepared & { kind: 'render' } = {
-        kind: 'render',
-        route: nextRoute,
-        url,
-        state: createRouterState(nextRoute, url, {
-          history: options.history,
-          scroll: options.shouldScroll,
-          pathChanged: nextRoute.path !== committed.route.path,
-          follows: 0,
-        }),
-        patch: overlay,
-        merge: (current) => {
-          const arriving = response.catch(() => current);
-          const available = prefetched
-            ? combineElements(current, prefetched, {
-                filter: (key) =>
-                  typeof key === 'string' && !Object.hasOwn(current, key),
-              })
-            : current;
-          const pending: Record<string | symbol, unknown> = {};
-          for (const key of Reflect.ownKeys(available)) {
-            // Keep what cannot change; everything else waits for the response.
-            const kept = Object.hasOwn(current, key)
-              ? key !== INTENT_ID &&
-                (typeof key === 'symbol' ||
-                  isMetaKey(key) ||
-                  isImmutableElement(current, key))
-              : isImmutableElement(available, String(key));
-            if (!kept) {
-              pending[key] = arriving.then((elements) =>
-                Object.hasOwn(elements, key)
-                  ? elements[key]
-                  : prefetched && Object.hasOwn(prefetched, key)
-                    ? prefetched[key]
-                    : current[key],
-              );
-            }
-          }
-          return combineElements(combineElements(available, pending), overlay);
-        },
-        fetched: false,
-      };
-      return { preview, response };
-    },
-    [cache],
-  );
-
-  // Queues the frame for a prepared route. Returns once React has committed
-  // it when `waitForCommit` is set.
-  const accept = useCallback(
-    (
-      attempt: Attempt,
-      prepared: Prepared & { kind: 'render' | 'failed' },
-      // A transition keeps the current content until the new frame is ready.
-      // An instant preview is meant to replace it at once.
-      schedule: (update: () => void) => void = startTransition,
-    ) => {
-      if (attempt.signal.aborted) {
-        throw abortError();
-      }
-      const committed = new Promise<void>((resolve, reject) => {
-        attempt.commitWaiters.add(resolve);
-        attempt.signal.addEventListener('abort', () => {
-          attempt.commitWaiters.delete(resolve);
-          reject(abortError());
-        });
-      });
-      ignoreRejection(committed);
-      if (prepared.kind === 'render') {
-        attempt.accepted = prepared.route;
-        if (prepared.fetched) {
-          refreshOwedRef.current = false;
-        }
-      }
-      // React can run the updater more than once for the same previous
-      // frame; each run must return the same elements promise.
-      const results = new WeakMap<RenderFrame, RenderFrame>();
-      schedule(() => {
-        setFrame((prev) => {
-          if (attempt.signal.aborted) {
-            return prev;
-          }
-          const replayed = results.get(prev);
-          if (replayed) {
-            return replayed;
-          }
-          const next = createFrame(prev);
-          results.set(prev, next);
-          return next;
-        });
-      });
-      return committed;
-
-      function createFrame(prev: RenderFrame): RenderFrame {
-        if (prepared.kind === 'failed') {
-          return {
-            ...prev,
-            route: prepared.route,
-            commitId: attempt.id,
-            state: undefined,
-            error: { error: prepared.error },
-          };
-        }
-        const settled = committedRef.current.route;
-        return {
-          route: withEntryHash(prepared.route, prepared.url),
-          elements: prev.elements.then((current) =>
-            prepared.merge(current, settled),
-          ),
-          commitId: attempt.id,
-          state: prepared.state,
-          error: undefined,
-        };
-      }
-    },
-    [setFrame],
-  );
-
-  const startAttempt = useCallback(
-    (target: Pick<RouteProps, 'path' | 'query'>): Attempt => {
-      const controller = new AbortController();
-      const attempt: Attempt = {
-        id: ++nextIdRef.current,
-        controller,
-        signal: controller.signal,
-        target,
-        ownsUrl: false,
-        commitWaiters: new Set(),
-      };
-      liveAttemptsRef.current.add(attempt);
-      pendingRef.current = attempt;
-      if (import.meta.hot) {
-        // Router owns the HMR target; keep Minimal's listener replaced.
-        registerRscReloadListener(() => {}, { replace: true });
-      }
-      controller.signal.addEventListener('abort', () => {
-        liveAttemptsRef.current.delete(attempt);
-        if (pendingRef.current === attempt) {
-          pendingRef.current = undefined;
-          if (refreshOwedRef.current) {
-            refreshAbandonedRef.current?.();
-          }
-        }
-      });
-      return attempt;
-    },
-    [registerRscReloadListener],
-  );
-  // The attempt now decides what the current URL shows; older ones give way.
-  const takeUrl = useCallback((attempt: Attempt) => {
-    attempt.ownsUrl = true;
-    for (const other of [...liveAttemptsRef.current]) {
-      if (other.id < attempt.id) {
-        other.controller.abort();
-      }
-    }
-  }, []);
   // Drop the attempts when the router goes away. StrictMode runs effects
   // twice on mount, so wait a tick and skip the drop if the effect is back.
   const unmountRef = useRef<{ cancelled: boolean }>(undefined);
@@ -598,502 +578,27 @@ export function useNavigation(
     if (unmountRef.current) {
       unmountRef.current.cancelled = true;
     }
-    const liveAttempts = liveAttemptsRef.current;
     return () => {
       const unmount = { cancelled: false };
       unmountRef.current = unmount;
       queueMicrotask(() => {
-        if (unmount.cancelled) {
-          return;
-        }
-        refreshAbandonedRef.current = undefined;
-        for (const attempt of [...liveAttempts]) {
-          attempt.controller.abort();
+        if (!unmount.cancelled) {
+          navigation.disconnect();
         }
       });
     };
-  }, []);
+  }, [navigation]);
 
-  // An update that moves nothing in the browser: the same location with new
-  // content, as after a server function rerenders the route.
-  const applyInPlace = useCallback(
-    async (nextRoute: RouteProps, options: ChangeRouteOptions) => {
-      const attempt = startAttempt(nextRoute);
-      takeUrl(attempt);
-      const url = options.url ?? new URL(window.location.href);
-      try {
-        const prepared = await prepare(attempt, nextRoute, url, options);
-        if (prepared.kind === 'leave') {
-          void window.navigation.navigate(prepared.location.href, {
-            info: HANDOFF,
-            history: 'replace',
-          });
-          return;
-        }
-        if (prepared.kind === 'reload') {
-          void window.navigation.reload({ info: HANDOFF });
-          return;
-        }
-        // A failed load becomes an error frame, which the boundary shows.
-        ignoreRejection(accept(attempt, prepared));
-      } catch (e) {
-        if (attempt.signal.aborted) {
-          options.onSuperseded?.();
-          return;
-        }
-        throw e;
-      }
-    },
-    [accept, prepare, startAttempt, takeUrl],
-  );
-
-  const changeRoute: ChangeRoute = useCallback(
-    (nextRoute, options) => {
-      const url = options.url ?? getRouteUrl(nextRoute);
-      if (!isSameOrigin(url)) {
-        const error = otherOriginError(url);
-        setFrame((prev) => ({ ...prev, error: { error } }));
-        return Promise.reject(error);
-      }
-      if (options.history === null) {
-        return applyInPlace(nextRoute, options);
-      }
-      const settle = Promise.withResolvers<void>();
-      const result = window.navigation.navigate(url.href, {
-        history: options.history === 'replace' ? 'replace' : 'auto',
-        info: new RequestInfo(nextRoute, options, settle),
-      });
-      // The router reports the outcome through `settle`.
-      ignoreRejection(result.committed);
-      ignoreRejection(result.finished);
-      return settle.promise;
-    },
-    [applyInPlace, setFrame],
-  );
-
-  // A dropped update is expected. Anything else would otherwise disappear
-  // without a trace.
-  const reportUnlessHandled = useCallback((error: unknown) => {
-    if (!(error instanceof DOMException && error.name === 'AbortError')) {
-      console.error('Error while applying a route update:', error);
-    }
-  }, []);
-  const applyRouteResponse = useCallback(
-    async (responseElements: Elements) => {
-      const nextRoute = getRouteFromElements(responseElements)!;
-      const current = getSettledRoute();
-      const sameRoute =
-        current.path === nextRoute.path &&
-        (isStaticFromElements(responseElements) ||
-          current.query === nextRoute.query);
-      const is404 = nextRoute.path === '/404';
-      await dispatchChangeRoute(changeRoute, sameRoute ? current : nextRoute, {
-        adopt: Promise.resolve(responseElements),
-        shouldScroll: false,
-        history: sameRoute || is404 ? null : 'push',
-        ...(is404 ? { url: new URL(window.location.href) } : {}),
-      }).catch(reportUnlessHandled);
-    },
-    [changeRoute, getSettledRoute, reportUnlessHandled],
-  );
-  const getPendingRoute = useCallback(() => pendingRef.current?.target, []);
-  const onOriginRerenderDropped = useCallback(() => {
-    refreshOwedRef.current = true;
-  }, []);
-  useEffect(() => {
-    refreshAbandonedRef.current = () => {
-      startTransition(() => {
-        void applyInPlace(committedRef.current.route, {
-          refetch: true,
-          shouldScroll: false,
-          history: null,
-        }).catch(reportUnlessHandled);
-      });
-    };
-  }, [applyInPlace, reportUnlessHandled]);
+  useHmrRefetch({
+    getSettledRoute: navigation.getRefetchRoute,
+    onBeforeRefetch: navigation.dropLoading,
+  });
   useServerFunctionRouting(serverFunctionRouting, {
-    getSettledRoute,
-    getPendingRoute,
-    applyRouteResponse,
-    onOriginRerenderDropped,
+    getSettledRoute: navigation.getRoute,
+    getPendingRoute: navigation.getPendingRoute,
+    applyRouteResponse: navigation.applyRouteResponse,
+    onOriginRerenderDropped: navigation.applyOriginRerender,
   });
 
-  // Starts listening to the browser. The caller runs this from the first
-  // layout effect under the router, so a navigation started by any other
-  // layout effect during mount is already seen.
-  const connect = useCallback(() => {
-    const { navigation } = window;
-
-    const onNavigate = (event: NavigateEvent) => {
-      if (
-        event.info === HANDOFF ||
-        // React navigates to the current URL while a transition is pending,
-        // only to make the browser show that the page is busy.
-        event.info === 'react-transition' ||
-        !event.canIntercept ||
-        event.downloadRequest !== null ||
-        event.formData
-      ) {
-        return;
-      }
-      if (event.info === RETURN) {
-        // Nothing changes on screen; only the address bar goes back.
-        event.intercept({ scroll: 'manual', focusReset: 'manual' });
-        return;
-      }
-      if (isExternalLink(event.sourceElement)) {
-        // The author asked for a document load, for example to sign out.
-        return;
-      }
-      const info = event.info instanceof RequestInfo ? event.info : undefined;
-      if (event.hashChange) {
-        // The browser scrolls to the fragment unless the caller opted out;
-        // `currententrychange` below records the new hash.
-        if (info && !info.options.shouldScroll) {
-          event.intercept({ scroll: 'manual', focusReset: 'manual' });
-        }
-        info?.settle.resolve();
-        return;
-      }
-      if (
-        !info &&
-        event.destination.sameDocument &&
-        (event.navigationType === 'push' || event.navigationType === 'replace')
-      ) {
-        // `history.pushState()` or `replaceState()` from other code: that
-        // code changed the URL for its own purposes and shows its own content.
-        return;
-      }
-      const url = new URL(event.destination.url);
-      const requestedRoute = info?.route ?? parseRoute(url);
-      if (event.navigationType === 'traverse' && routeInterceptorRef.current) {
-        // Back and Forward can be refused or pointed at another route. The
-        // decision is made now, before the address bar moves.
-        const decided = routeInterceptorRef.current(requestedRoute);
-        if (!decided) {
-          if (event.cancelable) {
-            event.preventDefault();
-          } else {
-            // The browser moves regardless. Go along, then return to the
-            // entry still on screen, so the address bar keeps matching it.
-            const shown = navigation.currentEntry?.key;
-            event.intercept({
-              scroll: 'manual',
-              focusReset: 'manual',
-              handler: async () => {
-                if (shown !== undefined) {
-                  setTimeout(() => {
-                    const back = navigation.traverseTo(shown, { info: RETURN });
-                    ignoreRejection(back.committed);
-                    ignoreRejection(back.finished);
-                  });
-                }
-              },
-            });
-          }
-          return;
-        }
-        if (!isSameRoute(decided, requestedRoute)) {
-          event.intercept({
-            scroll: 'manual',
-            focusReset: 'manual',
-            handler: async () => {
-              startTransition(() => {
-                void changeRoute(decided, {
-                  shouldScroll: shouldScrollForRouteChange(
-                    decided,
-                    committedRef.current.route,
-                  ),
-                  history: 'replace',
-                }).catch(reportUnlessHandled);
-              });
-            },
-          });
-          return;
-        }
-      }
-      const nextRoute = requestedRoute;
-      const options: ChangeRouteOptions = info?.options ?? {
-        // Back and Forward between entries that differ only in the query stay
-        // where the page is, like a query-only push.
-        shouldScroll:
-          event.navigationType !== 'traverse' ||
-          shouldScrollForRouteChange(nextRoute, committedRef.current.route),
-        history: event.navigationType === 'replace' ? 'replace' : 'push',
-      };
-      const attempt = startAttempt(nextRoute);
-      event.signal.addEventListener('abort', () => {
-        if (!attempt.ownsUrl) {
-          attempt.controller.abort();
-        }
-      });
-      attempt.signal.addEventListener('abort', () => {
-        options.onSuperseded?.();
-        // A superseded navigation counts as handled.
-        info?.settle.resolve();
-      });
-      const fail = (error: unknown) => {
-        if (info) {
-          info.settle.reject(error);
-        } else if (!attempt.signal.aborted) {
-          console.error('Error while navigating:', error);
-        }
-      };
-
-      const handOff = (prepared: Prepared & { kind: 'leave' | 'reload' }) => {
-        const push = event.navigationType === 'push';
-        if (prepared.kind === 'leave' && !isSameOrigin(prepared.location)) {
-          // Another origin is never intercepted; `location` is the one way
-          // to leave that every browser honours here.
-          if (push) {
-            window.location.assign(prepared.location.href);
-          } else {
-            window.location.replace(prepared.location.href);
-          }
-          return;
-        }
-        // Same origin: tagged, so this listener lets the browser load the
-        // document. For a build mismatch that is the requested URL itself.
-        const result = navigation.navigate(
-          prepared.kind === 'leave'
-            ? prepared.location.href
-            : prepared.url.href,
-          { info: HANDOFF, history: push ? 'push' : 'replace' },
-        );
-        ignoreRejection(result.committed);
-        ignoreRejection(result.finished);
-      };
-
-      const show = async (
-        prepared: Prepared & { kind: 'render' | 'failed' },
-        schedule?: (update: () => void) => void,
-      ) => {
-        const committed = accept(attempt, prepared, schedule);
-        // The frame is queued and the URL has moved: the caller can go on.
-        if (prepared.kind === 'failed') {
-          fail(prepared.error);
-        } else {
-          info?.settle.resolve();
-        }
-        // Read while this navigation is still the browser's current one.
-        const transition = event.signal.aborted
-          ? undefined
-          : navigation.transition;
-        await committed;
-        if (
-          prepared.kind === 'render' &&
-          options.shouldScroll &&
-          (event.navigationType === 'push' ||
-            event.navigationType === 'replace')
-        ) {
-          // After the browser's own scroll, which a late target missed.
-          transition?.finished.then(
-            () => scrollToHashWhenRendered(committedRef.current.route.hash),
-            () => {},
-          );
-        }
-      };
-
-      const behavior = options.shouldScroll
-        ? {}
-        : ({ scroll: 'manual', focusReset: 'manual' } as const);
-      const canPrepareFirst =
-        event.cancelable &&
-        (event.navigationType === 'push' || event.navigationType === 'replace');
-
-      // The route the response names is not the one this entry asked for.
-      // Replace the entry with a navigation that shows that response.
-      const redirectTo = (result: Prepared & { kind: 'render' }) => {
-        startTransition(() => {
-          void changeRoute(result.route, {
-            adopt: Promise.resolve(result.patch),
-            shouldScroll: options.shouldScroll,
-            history: 'replace',
-            url: result.url,
-          }).catch(() => {});
-        });
-      };
-
-      const instant =
-        options.instant && canPrepareFirst
-          ? startPreview(attempt, nextRoute, url, options)
-          : undefined;
-      if (instant) {
-        // The shell is already here: move at once, show it, and let the
-        // response fill in the rest.
-        const fill = async () => {
-          let result: Prepared;
-          try {
-            result = await prepare(attempt, nextRoute, url, {
-              ...options,
-              adopt: instant.response,
-            });
-          } catch (e) {
-            if (!attempt.signal.aborted) {
-              fail(e);
-            }
-            return;
-          }
-          if (result.kind === 'leave' || result.kind === 'reload') {
-            handOff(result);
-          } else if (result.kind === 'failed') {
-            ignoreRejection(accept(attempt, result));
-          } else if (result.url.href !== url.href) {
-            redirectTo(result);
-          } else {
-            const { patch } = result;
-            ignoreRejection(
-              accept(attempt, {
-                ...result,
-                // The preview already reads the response where it left
-                // parts pending; add only what it did not represent.
-                merge: (current) =>
-                  combineElements(current, patch, {
-                    filter: (key) =>
-                      typeof key === 'string' &&
-                      (isMetaKey(key) || !Object.hasOwn(current, key)),
-                  }),
-              }),
-            );
-          }
-        };
-        event.intercept({
-          ...behavior,
-          handler: async () => {
-            takeUrl(attempt);
-            const shown = show(instant.preview, runNow);
-            void fill();
-            await shown;
-          },
-        });
-        return;
-      }
-
-      if (canPrepareFirst) {
-        // Load before the URL moves, so the address bar and the content
-        // change together and a redirect leaves no entry of its own.
-        let prepared: (Prepared & { kind: 'render' | 'failed' }) | undefined;
-        event.intercept({
-          ...behavior,
-          precommitHandler: async (controller) => {
-            let result: Prepared;
-            try {
-              result = await prepare(attempt, nextRoute, url, options);
-            } catch (e) {
-              fail(e);
-              throw e;
-            }
-            if (result.kind === 'leave' || result.kind === 'reload') {
-              // Cancel this navigation first. A document navigation started
-              // while it is still being cancelled can be cancelled with it.
-              setTimeout(() => handOff(result));
-              throw abortError();
-            }
-            if (result.url.href !== event.destination.url) {
-              controller.redirect(result.url.href);
-            }
-            prepared = result;
-          },
-          handler: () => {
-            takeUrl(attempt);
-            return show(prepared!);
-          },
-        });
-        return;
-      }
-
-      // The browser has already decided to move (Back, Forward, reload).
-      event.intercept({
-        ...behavior,
-        handler: async () => {
-          takeUrl(attempt);
-          let result: Prepared;
-          try {
-            result = await prepare(attempt, nextRoute, url, options);
-          } catch (e) {
-            fail(e);
-            throw e;
-          }
-          if (result.kind === 'leave' || result.kind === 'reload') {
-            handOff(result);
-            return;
-          }
-          if (
-            result.kind === 'render' &&
-            result.url.href !== event.destination.url
-          ) {
-            redirectTo(result);
-            return;
-          }
-          await show(result);
-        },
-      });
-    };
-
-    // Fragment-only navigations are not intercepted, so record their hash
-    // here. A new state object makes intents captured before it stale.
-    const onEntryChange = () => {
-      const entryUrl = navigation.currentEntry?.url;
-      if (!entryUrl) {
-        return;
-      }
-      const url = new URL(entryUrl);
-      const shown = committedRef.current.route;
-      setFrame((prev) => {
-        // The newest frame, which may still be waiting to commit.
-        const target = prev.route ?? shown;
-        const targetUrl = prev.state
-          ? new URL(prev.state.url, url)
-          : getRouteUrl(target);
-        if (
-          prev.error ||
-          url.hash === target.hash ||
-          url.pathname + url.search !== targetUrl.pathname + targetUrl.search
-        ) {
-          return prev;
-        }
-        const route = { ...target, hash: url.hash };
-        return {
-          ...prev,
-          route,
-          // A new object, so intents captured before this are stale.
-          state: {
-            ...createRouterState(route, url, {
-              history: null,
-              scroll: false,
-              pathChanged: false,
-              follows: prev.state?.follows ?? 0,
-            }),
-            ...(prev.state ? { requested: prev.state.requested } : {}),
-          },
-        };
-      });
-    };
-
-    navigation.addEventListener('navigate', onNavigate);
-    navigation.addEventListener('currententrychange', onEntryChange);
-    return () => {
-      navigation.removeEventListener('navigate', onNavigate);
-      navigation.removeEventListener('currententrychange', onEntryChange);
-    };
-  }, [
-    accept,
-    changeRoute,
-    prepare,
-    setFrame,
-    reportUnlessHandled,
-    startAttempt,
-    startPreview,
-    takeUrl,
-  ]);
-
-  return {
-    route,
-    connect,
-    changeRoute,
-    getElements,
-    getRouteState,
-    getScope,
-    isCurrentScope,
-  };
+  return { route, navigation };
 }

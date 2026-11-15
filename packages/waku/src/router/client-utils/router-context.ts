@@ -1,7 +1,7 @@
 import { createContext, startTransition } from 'react';
 import type { TransitionFunction } from 'react';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
-import type { RouterState } from './router-state.js';
+import type { Origin, Scope } from './frame.js';
 
 export type ChangeRouteOptions = {
   shouldScroll: boolean;
@@ -19,30 +19,19 @@ export type ChangeRoute = (
   options: ChangeRouteOptions,
 ) => Promise<void>;
 
-/**
- * A token for the displayed content. A new one is issued for each
- * navigation shown and for each fragment change; `navigation` stays the
- * same across fragment changes on one route.
- */
-export type RouteScope = {
-  readonly navigation: number;
-  /** The request the displayed route was loaded for. */
-  readonly state: RouterState | undefined;
-};
-
 export const RouterContext = createContext<{
   route: RouteProps;
   changeRoute: ChangeRoute;
   getElements?: () => Record<string, unknown>;
   /** Identifies what is on screen now, for work that must not outlive it. */
-  getScope?: () => RouteScope;
+  getScope?: () => Scope;
   /**
    * Whether `scope` still describes what is on screen and no navigation is
    * loading. With `exact`, a fragment change since then also ends it.
    */
-  isCurrentScope?: (scope: RouteScope, exact: boolean) => boolean;
-  /** The request the displayed route was loaded for. */
-  getRouteState?: () => RouterState | undefined;
+  isCurrentScope?: (scope: Scope, exact: boolean) => boolean;
+  /** The request the displayed route came from; none before a navigation. */
+  getOrigin?: () => Origin | undefined;
 } | null>(null);
 
 export function dispatchChangeRoute(

@@ -48,45 +48,22 @@ export const serverRedirectEnhancer: Unstable_RscEnhancer =
     };
   };
 
-export type RouterState = {
-  readonly url: string; // pathname + search + hash, with the base path
-  readonly requested: readonly [path: string, query: string];
-  readonly history: 'push' | 'replace' | null;
-  readonly scroll: { readonly pathChanged: boolean } | null;
-  readonly follows: number;
-};
-
-export function createRouterState(
-  route: RouteProps,
-  url: URL,
-  options: {
-    history: 'push' | 'replace' | null;
-    scroll: boolean;
-    pathChanged: boolean;
-    follows: number;
-  },
-): RouterState {
-  return {
-    url: url.pathname + url.search + url.hash,
-    requested: [route.path, route.query],
-    history: options.history,
-    scroll: options.scroll ? { pathChanged: options.pathChanged } : null,
-    follows: options.follows,
-  };
-}
-
+/**
+ * The route and URL a response is shown at. The response names the route the
+ * server rendered, which differs from the requested one after a redirect and
+ * for a custom 404, which keeps the requested URL.
+ */
 export function resolveServerRedirect(
   elements: Record<string | symbol, unknown>,
-  routerState: RouterState,
+  requested: { route: Pick<RouteProps, 'path' | 'query'>; url: URL },
   fallbackPath: string,
 ): { route: RouteProps; url: URL } {
-  const stateUrl = new URL(routerState.url, window.location.href);
   const serverRoute = getRouteFromElements(elements);
   const redirect =
     serverRoute &&
-    (serverRoute.path !== routerState.requested[0] ||
+    (serverRoute.path !== requested.route.path ||
       (!isStaticFromElements(elements) &&
-        serverRoute.query !== routerState.requested[1]))
+        serverRoute.query !== requested.route.query))
       ? serverRoute
       : undefined;
   if (redirect && redirect.path !== '/404') {
@@ -95,9 +72,9 @@ export function resolveServerRedirect(
   return {
     route: {
       path: redirect?.path ?? serverRoute?.path ?? fallbackPath,
-      query: stateUrl.searchParams.toString(),
-      hash: stateUrl.hash,
+      query: requested.url.searchParams.toString(),
+      hash: requested.url.hash,
     },
-    url: stateUrl,
+    url: requested.url,
   };
 }
