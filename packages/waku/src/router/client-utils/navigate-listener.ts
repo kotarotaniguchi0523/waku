@@ -9,7 +9,7 @@ import { handOff } from './handoff.js';
 import { startPreview } from './instant-preview.js';
 import { abortError, ignoreRejection, ignoreResult } from './promises.js';
 import { fetched, resolve } from './resolve.js';
-import type { Displayed, Source } from './resolve.js';
+import type { Displayed, Request, Source } from './resolve.js';
 import type { ChangeRouteOptions } from './router-context.js';
 import {
   scrollToHashWhenRendered,
@@ -184,32 +184,38 @@ export function createNavigateListener({ at, attempts, start, show }: Binding) {
         }
       };
 
+    // The result is resolved once; both handlers below wait for it. With
+    // the destination's shell at hand, an instant navigation also gets a
+    // preview to show until the response has arrived.
     const source = info?.source ?? fetched;
-    const request = {
-      route,
-      url,
-      scroll: options.shouldScroll,
-      refetch: options.refetch,
-    };
-    const instant =
-      options.instant && waitsBeforeCommit && source.kind === 'fetch'
-        ? startPreview({ ...request, source }, at(), at().cache, attempt.signal)
-        : undefined;
-    // The result is resolved once; both handlers below wait for it.
-    const outcome =
-      source.kind === 'resolved'
-        ? Promise.resolve(source.outcome)
-        : resolve(
-            {
+    let instant: ReturnType<typeof startPreview>;
+    let outcome: Promise<Outcome>;
+    if (source.kind === 'resolved') {
+      outcome = Promise.resolve(source.outcome);
+    } else {
+      const request: Request = {
+        route,
+        url,
+        scroll: options.shouldScroll,
+        refetch: options.refetch,
+        source,
+      };
+      const { cache } = at();
+      if (options.instant && waitsBeforeCommit) {
+        instant = startPreview(request, at(), cache, attempt.signal);
+      }
+      outcome = resolve(
+        instant
+          ? {
               ...request,
-              source: instant
-                ? { kind: 'response', response: instant.response }
-                : source,
-            },
-            at(),
-            at().cache,
-            attempt.signal,
-          );
+              source: { kind: 'response', response: instant.response },
+            }
+          : request,
+        at(),
+        cache,
+        attempt.signal,
+      );
+    }
     ignoreRejection(outcome);
     // The URL this navigation's entry is at, or will be once it commits.
     let entryUrl = event.destination.url;
