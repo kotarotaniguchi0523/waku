@@ -397,6 +397,26 @@ test.describe('navigation-contract', () => {
     await expect(page.getByTestId('route-path')).toHaveText('/');
   });
 
+  test('a plain anchor navigates in the app', async ({ page }) => {
+    await open(page, '/counter');
+    await page.getByTestId('run-increment').click();
+    await expect(page.getByTestId('action-result')).not.toHaveText('none');
+    await page.getByTestId('plain-anchor').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+    // Client state in the layout survived, so the document was not reloaded.
+    await expect(page.getByTestId('action-result')).not.toHaveText('none');
+  });
+
+  test('T20: an anchor marked rel="external" is left to the browser', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('external-anchor').click();
+    await expect(page).toHaveURL(`${origin()}/file`);
+    await expect(page.locator('body')).toHaveText('file contents');
+  });
+
   test('T20: a download link is left to the browser', async ({ page }) => {
     await open(page, '/');
     const download = page.waitForEvent('download');

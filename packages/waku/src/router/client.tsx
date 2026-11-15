@@ -99,7 +99,8 @@ type NavigateOptions = {
  * browser. It does not wait for React to render, so the address bar may still
  * show the previous URL.
  * After a browser handoff, recovery from a cancelled departure requires a new
- * navigation or reload. Use a native anchor for cancelable document navigation.
+ * navigation or reload. Use `<a rel="external">` for cancelable document
+ * navigation.
  */
 type Navigate = (
   to: NavigationHref,

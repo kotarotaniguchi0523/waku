@@ -24,7 +24,7 @@ export const Nav = () => (
 );
 ```
 
-Use a regular `<a>` element for external URLs, downloads, and links that intentionally open in another browsing context.
+Use a regular `<a>` element for external URLs, downloads, and links that intentionally open in another browsing context. A regular `<a>` to a URL on the same origin is also handled by the router as a client navigation; add `rel="external"` when it should load a document instead, such as a link to an API route.
 
 ## Static Route Caching
 

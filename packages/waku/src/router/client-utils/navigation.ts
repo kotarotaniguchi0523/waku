@@ -120,6 +120,14 @@ const withEntryHash = (route: RouteProps, url: URL): RouteProps => {
     : route;
 };
 
+// `<a rel="external">` opts a same-origin link out of client navigation.
+const isExternalLink = (element: Element | null | undefined) =>
+  !!element
+    ?.closest('a, area')
+    ?.getAttribute('rel')
+    ?.split(/\s+/)
+    .includes('external');
+
 const runNow = (update: () => void) => update();
 
 // A result that only adds its patch on top of the newest elements.
@@ -706,6 +714,10 @@ export function useNavigation(
         event.downloadRequest !== null ||
         event.formData
       ) {
+        return;
+      }
+      if (isExternalLink(event.sourceElement)) {
+        // The author asked for a document load, for example to sign out.
         return;
       }
       const info = event.info instanceof RequestInfo ? event.info : undefined;

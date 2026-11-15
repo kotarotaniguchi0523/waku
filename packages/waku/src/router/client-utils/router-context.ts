@@ -11,7 +11,6 @@ export type ChangeRouteOptions = {
   url?: URL | undefined;
   instant?: boolean | undefined;
   follows?: number | undefined;
-  pendingTransition?: ((fn: TransitionFunction) => void) | undefined;
   onSuperseded?: (() => void) | undefined;
 };
 
@@ -40,11 +39,9 @@ export function dispatchChangeRoute(
   startTransitionFn: (fn: TransitionFunction) => void = startTransition,
 ): Promise<void> {
   if (options.instant) {
-    // skip the outer wrap until changeRoute knows it will actually paint
-    return changeRoute(route, {
-      ...options,
-      pendingTransition: startTransitionFn,
-    });
+    // An instant navigation shows its preview at once, so it does not wait
+    // inside a transition.
+    return changeRoute(route, options);
   }
   // a transition keeps the current tree up while the destination loads
   return new Promise<void>((resolve, reject) => {

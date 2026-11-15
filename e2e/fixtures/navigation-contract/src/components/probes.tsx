@@ -114,6 +114,12 @@ export const BrowserOwned = () => (
     <a href="/file" download="file.txt" data-testid="download-link">
       Download
     </a>
+    <a href="/plain" data-testid="plain-anchor">
+      Plain anchor
+    </a>
+    <a href="/file" rel="external" data-testid="external-anchor">
+      External anchor
+    </a>
     <form method="post" action="/echo">
       <input type="hidden" name="message" value="posted" />
       <button type="submit" data-testid="post-form">
