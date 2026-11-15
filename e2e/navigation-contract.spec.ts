@@ -228,6 +228,31 @@ test.describe('navigation-contract', () => {
     await expect(page).toHaveURL(`${origin()}/plain`);
   });
 
+  test('T08: two actions and a navigation answered in reverse order end on the last thing done', async ({
+    page,
+  }) => {
+    await open(page, '/counter');
+    const before = Number(await page.getByTestId('count').textContent());
+    await page.getByTestId('run-gated-increment-t08a').click();
+    await waitUntilHeld(page, 't08a');
+    await page.getByTestId('run-gated-increment-t08b').click();
+    await waitUntilHeld(page, 't08b');
+    await page.getByTestId('go-gated-t08').click();
+    await waitUntilHeld(page, 't08');
+    await releaseGate(page, 't08');
+    await expect(shownPage(page)).toHaveText('gated');
+    await releaseGate(page, 't08b');
+    await releaseGate(page, 't08a');
+    // The last action to finish reports the count after both.
+    await expect(page.getByTestId('action-result')).toHaveText(
+      String(before + 2),
+    );
+    await expect(shownPage(page)).toHaveText('gated');
+    await expect(page).toHaveURL(`${origin()}/gated?gate=t08`);
+    await page.getByTestId('go-counter').click();
+    await expect(page.getByTestId('count')).toHaveText(String(before + 2));
+  });
+
   test('T09: a refresh from an action updates the data and nothing else', async ({
     page,
   }) => {
@@ -323,6 +348,81 @@ test.describe('navigation-contract', () => {
     await page.getByTestId('go-home').click();
     await expect(shownPage(page)).toHaveText('home');
     await expect(page).toHaveURL(`${origin()}/`);
+  });
+
+  test('T14: action updates survive navigating away and back, and the layout stays', async ({
+    page,
+  }) => {
+    await open(page, '/counter');
+    const before = Number(await page.getByTestId('count').textContent());
+    await page.getByTestId('run-increment').click();
+    await expect(page.getByTestId('count')).toHaveText(String(before + 1));
+    await page.getByTestId('go-plain').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page.getByTestId('go-home')).toBeVisible();
+    await page.getByTestId('go-counter').click();
+    await expect(page.getByTestId('count')).toHaveText(String(before + 1));
+    await page.getByTestId('run-increment').click();
+    await expect(page.getByTestId('count')).toHaveText(String(before + 2));
+    await page.goBack();
+    await expect(shownPage(page)).toHaveText('plain');
+    await page.goForward();
+    await expect(shownPage(page)).toHaveText('counter');
+    await expect(page.getByTestId('count')).toHaveText(String(before + 2));
+    await expect(page.getByTestId('go-home')).toBeVisible();
+    await expect(page.getByTestId('hydrated')).toHaveText('yes');
+  });
+
+  test('T19: under StrictMode the router hook follows a navigation, Back, a fragment and a state change', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-plain').click();
+    await expect(page.getByTestId('route-path')).toHaveText('/plain');
+    await page.goBack();
+    await expect(page.getByTestId('route-path')).toHaveText('/');
+    await page.evaluate(() => {
+      location.hash = 'section';
+    });
+    await expect(page.getByTestId('route-hash')).toHaveText('#section');
+    await page.evaluate(() =>
+      window.navigation.updateCurrentEntry({ state: { step: 2 } }),
+    );
+    await expect(page.getByTestId('route-path')).toHaveText('/');
+    await expect(page.getByTestId('route-hash')).toHaveText('#section');
+    await page.goBack();
+    await expect(page.getByTestId('route-hash')).toHaveText('');
+    await page.goForward();
+    await expect(page.getByTestId('route-hash')).toHaveText('#section');
+    await expect(page.getByTestId('route-path')).toHaveText('/');
+  });
+
+  test('T20: a download link is left to the browser', async ({ page }) => {
+    await open(page, '/');
+    const download = page.waitForEvent('download');
+    await page.getByTestId('download-link').click();
+    expect((await download).suggestedFilename()).toBe('file.txt');
+    await expect(shownPage(page)).toHaveText('home');
+    await expect(page).toHaveURL(`${origin()}/`);
+    await page.getByTestId('go-plain').click();
+    await expect(shownPage(page)).toHaveText('plain');
+  });
+
+  test('T20: a form post is left to the browser', async ({ page }) => {
+    await open(page, '/');
+    await page.getByTestId('post-form').click();
+    await expect(page).toHaveURL(`${origin()}/echo`);
+    await expect(page.locator('body')).toHaveText('echo: posted');
+  });
+
+  test('T20: a form get navigates in the app', async ({ page }) => {
+    await open(page, '/');
+    await page.getByTestId('get-form').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain?from=form`);
+    await expect(page.getByTestId('route-query')).toHaveText('from=form');
+    // Still the same document: the layout was not loaded again.
+    await expect(page.getByTestId('action-result')).toHaveText('none');
   });
 
   test('T15: opening a URL with query and hash hydrates and reports both', async ({

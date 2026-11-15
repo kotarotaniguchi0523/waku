@@ -2,12 +2,13 @@ import type { ReactNode } from 'react';
 import { Link } from 'waku';
 import {
   ActionPanel,
+  BrowserOwned,
   Hydrated,
   LeaveDocument,
   RouteProbe,
 } from '../components/probes.js';
 
-const gatedIds = ['t01b', 't05b', 't06', 't06b', 'g2'];
+const gatedIds = ['t01b', 't05b', 't06', 't06b', 't08', 'g2'];
 const gatedChildIds = ['t04'];
 const heldRequestIds = ['t01', 't05'];
 
@@ -70,6 +71,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       <RouteProbe />
       <ActionPanel />
       <LeaveDocument />
+      <BrowserOwned />
       {children}
     </div>
   );

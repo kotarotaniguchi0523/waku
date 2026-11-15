@@ -61,7 +61,7 @@ export const ActionPanel = () => {
       >
         Increment
       </button>
-      {['t07'].map((gateId) => (
+      {['t07', 't08a', 't08b'].map((gateId) => (
         <button
           key={gateId}
           type="button"
@@ -107,3 +107,24 @@ export const LeaveDocument = () => {
     </div>
   );
 };
+
+// Things the browser handles on its own: a download and a form post.
+export const BrowserOwned = () => (
+  <div>
+    <a href="/file" download="file.txt" data-testid="download-link">
+      Download
+    </a>
+    <form method="post" action="/echo">
+      <input type="hidden" name="message" value="posted" />
+      <button type="submit" data-testid="post-form">
+        Post form
+      </button>
+    </form>
+    <form method="get" action="/plain">
+      <input type="hidden" name="from" value="form" />
+      <button type="submit" data-testid="get-form">
+        Get form
+      </button>
+    </form>
+  </div>
+);
