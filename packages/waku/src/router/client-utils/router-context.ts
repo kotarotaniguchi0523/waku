@@ -27,7 +27,7 @@ export const RouterContext = createContext<{
   isCurrentRoute?: (
     source: Readonly<Record<string | symbol, unknown>>,
   ) => boolean;
-  /** The request an element record was committed for, when the router tracks it outside the record. */
+  /** The request an element record was committed for. */
   getRouteState?: (
     source: Readonly<Record<string | symbol, unknown>>,
   ) => RouterState | undefined;

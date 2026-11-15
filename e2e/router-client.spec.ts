@@ -19,40 +19,66 @@ const allowedConsoleErrorPatterns: RegExp[] = [
 const isAllowedConsoleError = (text: string) =>
   allowedConsoleErrorPatterns.some((pattern) => pattern.test(text));
 
-const installScrollToRecorder = async (page: Page) => {
-  await page.evaluate(() => {
-    const scrollToCalls: ScrollToOptions[] = [];
-    (window as unknown as Record<string, unknown>).__scrollToCalls =
-      scrollToCalls;
-    const originalScrollTo = window.scrollTo.bind(window);
-    window.scrollTo = ((options: ScrollToOptions | number, top?: number) => {
-      if (typeof options === 'number') {
-        scrollToCalls.push({ left: options, top: top ?? 0 });
-        originalScrollTo(options, top ?? 0);
-        return;
-      }
-      scrollToCalls.push(options);
-      originalScrollTo(options);
-    }) as typeof window.scrollTo;
-  });
-};
+// The browser does the scrolling, so these helpers watch where the page ends
+// up instead of who asked for it. A "scroll" is a change of position since
+// the recorder was installed or last reset.
+type ScrollPosition = { left: number; top: number };
+// `anchor` is where a fixed piece of content sits in the viewport. When
+// content is added above it the browser adjusts the scroll offset to keep it
+// in place, which is not a scroll the user sees.
+type ScrollReading = ScrollPosition & { anchor: number | null };
 
-const resetScrollToCalls = async (page: Page) => {
-  await page.evaluate(() => {
-    const calls = (window as unknown as Record<string, unknown>)
-      .__scrollToCalls as ScrollToOptions[] | undefined;
-    if (calls) {
-      calls.length = 0;
-    }
-  });
-};
-
-const getScrollToCalls = async (page: Page) =>
-  (await page.evaluate(
+const readScroll = (page: Page): Promise<ScrollReading> =>
+  page.evaluate(
     () =>
-      (window as unknown as Record<string, unknown>)
-        .__scrollToCalls as ScrollToOptions[],
-  )) as ScrollToOptions[];
+      new Promise<{ left: number; top: number; anchor: number | null }>(
+        (resolve) => {
+          // two frames let a scroll that follows a commit take place
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() =>
+              resolve({
+                left: window.scrollX,
+                top: window.scrollY,
+                anchor:
+                  document
+                    .getElementById('scroll-target')
+                    ?.getBoundingClientRect().top ?? null,
+              }),
+            ),
+          );
+        },
+      ),
+  );
+
+const settledScroll = async (page: Page) => {
+  let previous = await readScroll(page);
+  while (true) {
+    const next = await readScroll(page);
+    if (next.left === previous.left && next.top === previous.top) {
+      return next;
+    }
+    previous = next;
+  }
+};
+
+const scrollBaselines = new WeakMap<Page, ScrollReading>();
+
+const installScrollToRecorder = async (page: Page) => {
+  scrollBaselines.set(page, await settledScroll(page));
+};
+
+const resetScrollToCalls = installScrollToRecorder;
+
+const getScrollToCalls = async (page: Page): Promise<ScrollPosition[]> => {
+  const baseline = scrollBaselines.get(page)!;
+  const { left, top, anchor } = await settledScroll(page);
+  const unmoved =
+    left === baseline.left &&
+    (anchor !== null && baseline.anchor !== null
+      ? Math.abs(anchor - baseline.anchor) <= 1
+      : top === baseline.top);
+  return unmoved ? [] : [{ left, top }];
+};
 
 test.describe('router-client', () => {
   let port: number;
@@ -114,7 +140,9 @@ test.describe('router-client', () => {
 
     await page.evaluate(() => {
       window.history.pushState({}, '', '/ignored?__interceptor=block');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      // a real traversal back onto that entry
+      window.history.pushState({}, '', '/start');
+      window.history.back();
     });
 
     await expect(page.getByRole('heading', { name: 'Start' })).toBeVisible();
@@ -167,7 +195,9 @@ test.describe('router-client', () => {
 
     await page.evaluate(() => {
       window.history.pushState({}, '', '/ignored?__interceptor=rewrite');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      // a real traversal back onto that entry
+      window.history.pushState({}, '', '/start');
+      window.history.back();
     });
 
     await waitForSelectorText(
@@ -183,6 +213,8 @@ test.describe('router-client', () => {
     await waitForSelectorText(page, 'h1', 'Intercepted');
   });
 
+  // Playwright's click() scrolls its target into view, which would move the
+  // page before the navigation does. These tests dispatch the click instead.
   test('hash-only link navigation scrolls to anchor target', async ({
     page,
   }) => {
@@ -190,7 +222,7 @@ test.describe('router-client', () => {
     await waitForHydration(page);
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-hash-target').click();
+    await page.getByTestId('router-push-hash-target').dispatchEvent('click');
 
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('');
@@ -220,7 +252,7 @@ test.describe('router-client', () => {
     // Uses a `<Link>` (not router.push) to a non-ASCII fragment. `URL.hash`
     // percent-encodes it, so the scroll lookup must decode before matching the
     // element id (issue #2123).
-    await page.getByTestId('go-hash-japanese').click();
+    await page.getByTestId('go-hash-japanese').dispatchEvent('click');
 
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('');
@@ -238,8 +270,16 @@ test.describe('router-client', () => {
       'japanese-target',
     );
     expect(lastScrollToCall?.top).toBeGreaterThan(100);
+    // The page cannot scroll past its end, so the target may sit lower than
+    // the top of the viewport.
+    const maxScrollTop = await page.evaluate(
+      () => document.documentElement.scrollHeight - window.innerHeight,
+    );
     expect(
-      Math.abs((lastScrollToCall?.top ?? 0) - japaneseTargetTop),
+      Math.abs(
+        (lastScrollToCall?.top ?? 0) -
+          Math.min(japaneseTargetTop, maxScrollTop),
+      ),
     ).toBeLessThanOrEqual(1);
   });
 
@@ -252,7 +292,7 @@ test.describe('router-client', () => {
 
     // Matches the exact surface reported in issue #2123: a hash-only
     // `<Link to="#日本語見出し">` without a path.
-    await page.getByTestId('go-hash-only-japanese').click();
+    await page.getByTestId('go-hash-only-japanese').dispatchEvent('click');
 
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('');
@@ -268,8 +308,16 @@ test.describe('router-client', () => {
       'japanese-target',
     );
     expect(lastScrollToCall?.top).toBeGreaterThan(100);
+    // The page cannot scroll past its end, so the target may sit lower than
+    // the top of the viewport.
+    const maxScrollTop = await page.evaluate(
+      () => document.documentElement.scrollHeight - window.innerHeight,
+    );
     expect(
-      Math.abs((lastScrollToCall?.top ?? 0) - japaneseTargetTop),
+      Math.abs(
+        (lastScrollToCall?.top ?? 0) -
+          Math.min(japaneseTargetTop, maxScrollTop),
+      ),
     ).toBeLessThanOrEqual(1);
   });
 
@@ -281,7 +329,7 @@ test.describe('router-client', () => {
     await installScrollToRecorder(page);
 
     // First click scrolls to the target (issue #2124 is about the second one).
-    await page.getByTestId('go-hash-target').click();
+    await page.getByTestId('go-hash-target').dispatchEvent('click');
     await expect(page).toHaveURL(/\/start#scroll-target$/);
     expect((await getScrollToCalls(page)).at(-1)?.top).toBeGreaterThan(100);
 
@@ -292,7 +340,7 @@ test.describe('router-client', () => {
     });
     await resetScrollToCalls(page);
 
-    await page.getByTestId('go-hash-target').click();
+    await page.getByTestId('go-hash-target').dispatchEvent('click');
 
     await expect(page).toHaveURL(/\/start#scroll-target$/);
     const scrollToCalls = await getScrollToCalls(page);
@@ -313,7 +361,7 @@ test.describe('router-client', () => {
     });
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-hash-missing').click();
+    await page.getByTestId('router-push-hash-missing').dispatchEvent('click');
 
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('');
@@ -333,7 +381,7 @@ test.describe('router-client', () => {
     });
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-query-only').click();
+    await page.getByTestId('router-push-query-only').dispatchEvent('click');
 
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('from=query-only');
@@ -354,7 +402,7 @@ test.describe('router-client', () => {
     });
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-trailing-slash').click();
+    await page.getByTestId('router-push-trailing-slash').dispatchEvent('click');
 
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('');
@@ -374,7 +422,7 @@ test.describe('router-client', () => {
     });
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-next').click();
+    await page.getByTestId('router-push-next').dispatchEvent('click');
 
     await expect(page.getByRole('heading', { name: 'Next' })).toBeVisible();
     await expect(page.getByTestId('route-path')).toHaveText('/next');
@@ -399,7 +447,7 @@ test.describe('router-client', () => {
     });
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-query-only').click();
+    await page.getByTestId('router-push-query-only').dispatchEvent('click');
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('from=query-only');
     expect(await getScrollToCalls(page)).toHaveLength(0);
@@ -419,7 +467,7 @@ test.describe('router-client', () => {
     expect(await getScrollToCalls(page)).toHaveLength(0);
   });
 
-  test('back/forward for path-change history scrolls to top', async ({
+  test('back/forward for path-change history restores each entry scroll position', async ({
     page,
   }) => {
     await page.goto(`http://localhost:${port}/start`);
@@ -430,7 +478,7 @@ test.describe('router-client', () => {
     });
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-next').click();
+    await page.getByTestId('router-push-next').dispatchEvent('click');
     await expect(page.getByRole('heading', { name: 'Next' })).toBeVisible();
     await expect(page.getByTestId('route-path')).toHaveText('/next');
     let scrollToCalls = await getScrollToCalls(page);
@@ -444,10 +492,11 @@ test.describe('router-client', () => {
     });
     await expect(page.getByRole('heading', { name: 'Start' })).toBeVisible();
     await expect(page.getByTestId('route-path')).toHaveText('/start');
+    // Back restores where the page was when it was left.
     scrollToCalls = await getScrollToCalls(page);
     lastScrollToCall = scrollToCalls.at(-1);
     expect(lastScrollToCall).toBeDefined();
-    expect(lastScrollToCall?.top).toBe(0);
+    expect(lastScrollToCall?.top).toBe(600);
 
     await resetScrollToCalls(page);
     await page.evaluate(() => {
@@ -468,7 +517,7 @@ test.describe('router-client', () => {
     await waitForHydration(page);
     await installScrollToRecorder(page);
 
-    await page.getByTestId('router-push-hash-target').click();
+    await page.getByTestId('router-push-hash-target').dispatchEvent('click');
     await expect(page.getByTestId('route-hash')).toHaveText('#scroll-target');
 
     await resetScrollToCalls(page);

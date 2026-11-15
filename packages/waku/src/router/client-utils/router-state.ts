@@ -3,7 +3,7 @@ import {
   unstable_formatRscUrl as formatRscUrl,
 } from 'waku/minimal/client';
 import type { Unstable_RscEnhancer } from 'waku/minimal/client';
-import { getRouteUrl, isSameRscRoute } from '../client-core-utils/route-url.js';
+import { getRouteUrl } from '../client-core-utils/route-url.js';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
 import {
   ROUTE_ID,
@@ -12,8 +12,6 @@ import {
   isStaticFromElements,
 } from '../isomorphic-utils/router-protocol.js';
 import type { RouteData } from '../isomorphic-utils/router-protocol.js';
-
-export const ROUTER_STATE_ID = Symbol('waku-router-state');
 
 export const serverRedirectEnhancer: Unstable_RscEnhancer =
   (next) => async (rscPath, rscParams, options) => {
@@ -56,37 +54,7 @@ export type RouterState = {
   readonly history: 'push' | 'replace' | null;
   readonly scroll: { readonly pathChanged: boolean } | null;
   readonly follows: number;
-  readonly failedFrom?: RouteProps;
-  readonly originalState?: RouterState;
 };
-
-type InstantRouterState = {
-  readonly state: RouterState;
-  readonly slotIds: ReadonlySet<string>;
-};
-
-export function createInstantRouterState(
-  state: RouterState,
-  elements: Record<string | symbol, unknown>,
-): InstantRouterState {
-  return { state, slotIds: new Set(Object.keys(elements)) };
-}
-
-export function getRouterState(
-  elements: Record<string | symbol, unknown>,
-): RouterState | undefined {
-  const state = elements[ROUTER_STATE_ID] as
-    RouterState | InstantRouterState | undefined;
-  return state && 'state' in state ? state.state : state;
-}
-
-export function getInstantSlotIds(
-  elements: Record<string | symbol, unknown>,
-): ReadonlySet<string> | undefined {
-  const state = elements[ROUTER_STATE_ID] as
-    RouterState | InstantRouterState | undefined;
-  return state && 'state' in state ? state.slotIds : undefined;
-}
 
 export function createRouterState(
   route: RouteProps,
@@ -113,16 +81,6 @@ export function resolveServerRedirect(
   fallbackPath: string,
 ): { route: RouteProps; url: URL } {
   const stateUrl = new URL(routerState.url, window.location.href);
-  if (routerState.failedFrom) {
-    return {
-      route: {
-        path: routerState.requested[0],
-        query: stateUrl.searchParams.toString(),
-        hash: stateUrl.hash,
-      },
-      url: stateUrl,
-    };
-  }
   const serverRoute = getRouteFromElements(elements);
   const redirect =
     serverRoute &&
@@ -142,21 +100,4 @@ export function resolveServerRedirect(
     },
     url: stateUrl,
   };
-}
-
-export function getSettledRoute(
-  elements: Record<string | symbol, unknown>,
-  fallback: RouteProps,
-): RouteProps {
-  const routerState = getRouterState(elements);
-  if (!routerState) {
-    return fallback;
-  }
-  if (routerState.failedFrom) {
-    const retained = getRouteFromElements(elements);
-    return retained && !isSameRscRoute(retained, routerState.failedFrom)
-      ? retained
-      : routerState.failedFrom;
-  }
-  return resolveServerRedirect(elements, routerState, fallback.path).route;
 }

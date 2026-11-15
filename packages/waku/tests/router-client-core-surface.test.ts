@@ -124,7 +124,6 @@ describe('waku/router/client surface', () => {
       'ErrorBoundary',
       'INTERNAL_ServerRouter',
       'Link',
-      'NativeRouter_UNSTABLE',
       'Router',
       'Slice',
       'useNavigationStatus_UNSTABLE',

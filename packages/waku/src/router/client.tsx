@@ -11,9 +11,7 @@ import {
 } from 'react';
 import {
   ControlledRoot_UNSTABLE as ControlledRoot,
-  Root_UNSTABLE as Root,
   Slot_UNSTABLE as Slot,
-  useElementsPromise_UNSTABLE as useElementsPromise,
   useInitialElements_UNSTABLE as useInitialElements,
 } from 'waku/minimal/client';
 import type { Unstable_RscEnhancer } from 'waku/minimal/client';
@@ -30,9 +28,8 @@ import {
 } from './client-core-utils/route-url.js';
 import type { ServerFunctionRouting } from './client-core-utils/server-function-routing.js';
 import { createServerFunctionRouting } from './client-core-utils/server-function-routing.js';
-import { useNativeNavigation } from './client-utils/native-navigation.js';
-import type { RenderFrame } from './client-utils/native-navigation.js';
 import { useNavigation } from './client-utils/navigation.js';
+import type { RenderFrame } from './client-utils/navigation.js';
 import {
   MissingRouteHandler,
   RenderError,
@@ -46,10 +43,7 @@ import {
   RouterContext,
   dispatchChangeRoute,
 } from './client-utils/router-context.js';
-import {
-  getRouterState,
-  serverRedirectEnhancer,
-} from './client-utils/router-state.js';
+import { serverRedirectEnhancer } from './client-utils/router-state.js';
 import { shouldScrollByDefault } from './client-utils/scroll.js';
 import type { NavigationHref } from './isomorphic-utils/build-route-href.js';
 import type { RouteProps } from './isomorphic-utils/route-path.js';
@@ -210,88 +204,14 @@ const createServerStub = (name: string) => () => {
   throw new Error(`${name} is not in the server`);
 };
 
-const InnerRouter = ({
-  serverFunctionRouting,
-  fallbackRoute,
-  routeInterceptor,
-}: {
-  serverFunctionRouting: ServerFunctionRouting;
-  fallbackRoute: RouteProps;
-  routeInterceptor: ((route: RouteProps) => RouteProps | false) | undefined;
-}) => {
-  const elementsPromise = useElementsPromise();
-  const elements = use(elementsPromise);
-  const {
-    route: currentRoute,
-    changeRoute,
-    getElements,
-    isCurrentRoute,
-    error: navigationError,
-  } = useNavigation(
-    elements,
-    fallbackRoute,
-    routeInterceptor,
-    serverFunctionRouting,
-  );
-
-  const [intentError, setIntentError] = useState<{
-    error: unknown;
-    scope: ReturnType<typeof getRouterState>;
-  }>();
-  const onIntentError = useCallback(
-    (error: unknown, source: Readonly<Record<string | symbol, unknown>>) => {
-      setIntentError({ error, scope: getRouterState(source) });
-    },
-    [],
-  );
-  const error =
-    navigationError ??
-    (intentError?.scope === getRouterState(elements) ? intentError : undefined);
-
-  const navigate = useCallback<RouterHost['navigate']>(
-    async (href, opts) => {
-      const url = new URL(href, window.location.href);
-      if (!isSameOrigin(url)) {
-        throw otherOriginError(url);
-      }
-      return dispatchChangeRoute(changeRoute, parseRoute(url), {
-        shouldScroll: opts.scroll ?? shouldScrollByDefault(url),
-        history: opts.history,
-        url,
-      });
-    },
-    [changeRoute],
-  );
-  const host = useMemo(
-    (): RouterHost => ({ route: currentRoute, navigate }),
-    [currentRoute, navigate],
-  );
-
-  const routeElement = error ? (
-    <RenderError error={error.error} />
-  ) : (
-    <Slot id={getRouteSlotId(currentRoute.path)} />
-  );
-  const rootAvailable =
-    'root' in elements && (!error || elements.root !== null);
-  return (
-    <RouterContext
-      value={{
-        route: currentRoute,
-        changeRoute,
-        getElements,
-        isCurrentRoute,
-      }}
-    >
-      <RouterHostContext value={host}>
-        <RouteIntent onError={onIntentError} />
-        <MissingRouteHandler>
-          {rootAvailable ? <Slot id="root">{routeElement}</Slot> : routeElement}
-        </MissingRouteHandler>
-      </RouterHostContext>
-    </RouterContext>
-  );
+// Rendered before the route, so its layout effect runs before those of the
+// route's own components.
+const Connect = ({ connect }: { connect: () => () => void }) => {
+  useLayoutEffect(() => connect(), [connect]);
+  return null;
 };
+
+const connectNothing = () => () => {};
 
 const EMPTY_RSC_ENHANCERS: readonly Unstable_RscEnhancer[] = [];
 const mountedServerFunctionRoutings: ServerFunctionRouting[] = [];
@@ -326,96 +246,36 @@ const getRouterRscEnhancers = (enhancers: readonly Unstable_RscEnhancer[]) => {
   return pipeline;
 };
 
-/**
- * Client router root. Each instance provides navigation state to its
- * descendants. Instances can start from different `initialRoute` values, but
- * navigation uses the document's shared URL and history. Server function
- * calls use the most recently mounted Minimal Root. `initialRoute` defaults
- * to the current browser location.
- */
-export function Router({
-  initialRoute = parseRoute(new URL(window.location.href)),
-  unstable_routeInterceptor,
-  unstable_rscEnhancers = EMPTY_RSC_ENHANCERS,
-}: {
-  initialRoute?: RouteProps;
-  /**
-   * Initial input and transport enhancers, last entry outermost. Snapshotted
-   * once per mount; keep the array reference stable across renders, including
-   * initial Suspense retries. Create it before rendering React and remount to
-   * change it with a new array. Router redirect and server function routing wrap this
-   * list, so result caches here do not retain their reconciled metadata.
-   */
-  unstable_rscEnhancers?: readonly Unstable_RscEnhancer[];
-  /**
-   * Intercepts browser history navigation (back/forward) before it commits;
-   * programmatic navigation and `Link` clicks are not intercepted. Return
-   * `false` to ignore the pop (the address bar has already moved); otherwise
-   * return the route to render.
-   */
-  unstable_routeInterceptor?: (route: RouteProps) => RouteProps | false;
-}) {
-  const [serverFunctionRouting] = useState(createServerFunctionRouting);
-  const [rscEnhancers] = useState(() =>
-    getRouterRscEnhancers(unstable_rscEnhancers),
-  );
-  useLayoutEffect(() => {
-    mountedServerFunctionRoutings.push(serverFunctionRouting);
-    return () => {
-      mountedServerFunctionRoutings.splice(
-        mountedServerFunctionRoutings.lastIndexOf(serverFunctionRouting),
-        1,
-      );
-    };
-  }, [serverFunctionRouting]);
-  const initialRscPath = encodeRoutePath(initialRoute.path);
-  const initialRscParams = useInitialRscParams(
-    initialRscPath,
-    initialRoute.query,
-  );
-  return (
-    <Root
-      initialRscPath={initialRscPath}
-      initialRscParams={initialRscParams}
-      rscEnhancers={rscEnhancers}
-    >
-      <MissingRouteHandler>
-        <InnerRouter
-          serverFunctionRouting={serverFunctionRouting}
-          fallbackRoute={initialRoute}
-          routeInterceptor={unstable_routeInterceptor}
-        />
-      </MissingRouteHandler>
-    </Root>
-  );
-}
-
 type Elements = Readonly<Record<string | symbol, unknown>>;
 
-const NativeInnerRouter = ({
+const InnerRouter = ({
   frame,
   setFrame,
   serverFunctionRouting,
   fallbackRoute,
+  routeInterceptor,
 }: {
   frame: RenderFrame;
   setFrame: Dispatch<SetStateAction<RenderFrame>>;
   serverFunctionRouting: ServerFunctionRouting;
   fallbackRoute: RouteProps;
+  routeInterceptor: ((route: RouteProps) => RouteProps | false) | undefined;
 }) => {
   const elements = use(frame.elements);
   const {
     route: currentRoute,
+    connect,
     changeRoute,
     getElements,
     getRouteState,
     isCurrentRoute,
-  } = useNativeNavigation(
+  } = useNavigation(
     frame,
     setFrame,
     elements,
     fallbackRoute,
     serverFunctionRouting,
+    routeInterceptor,
   );
 
   const [intentError, setIntentError] = useState<{
@@ -469,6 +329,7 @@ const NativeInnerRouter = ({
       }}
     >
       <RouterHostContext value={host}>
+        <Connect connect={connect} />
         <RouteIntent onError={onIntentError} />
         <MissingRouteHandler>
           {rootAvailable ? <Slot id="root">{routeElement}</Slot> : routeElement}
@@ -479,19 +340,37 @@ const NativeInnerRouter = ({
 };
 
 /**
- * Client router root built on the Navigation API. The browser owns the URL,
- * history, scroll and focus; this router loads the destination, and shows the
- * route and its elements from one piece of React state.
+ * Client router root, built on the Navigation API. The browser owns the URL,
+ * history, scroll and focus: the router listens for navigations, loads the
+ * destination, and shows the route and its elements from one piece of React
+ * state. It needs a browser with `navigation` and `precommitHandler`.
  *
- * Requires `navigation` with `precommitHandler` support.
+ * Each instance provides navigation state to its descendants. Instances can
+ * start from different `initialRoute` values, but navigation uses the
+ * document's shared URL and history. Server function calls use the most
+ * recently mounted Minimal Root. `initialRoute` defaults to the current
+ * browser location.
  */
-function NativeRouter({
+export function Router({
   initialRoute = parseRoute(new URL(window.location.href)),
+  unstable_routeInterceptor,
   unstable_rscEnhancers = EMPTY_RSC_ENHANCERS,
 }: {
   initialRoute?: RouteProps;
-  /** See `Router`. */
+  /**
+   * Initial input and transport enhancers, last entry outermost. Snapshotted
+   * once per mount; keep the array reference stable across renders, including
+   * initial Suspense retries. Create it before rendering React and remount to
+   * change it with a new array. Router redirect and server function routing wrap this
+   * list, so result caches here do not retain their reconciled metadata.
+   */
   unstable_rscEnhancers?: readonly Unstable_RscEnhancer[];
+  /**
+   * Intercepts Back and Forward; programmatic navigation and link clicks are
+   * not intercepted. Return `false` to ignore the traversal (the address bar
+   * has already moved); otherwise return the route to render.
+   */
+  unstable_routeInterceptor?: (route: RouteProps) => RouteProps | false;
 }) {
   const [serverFunctionRouting] = useState(createServerFunctionRouting);
   const [rscEnhancers] = useState(() =>
@@ -535,18 +414,17 @@ function NativeRouter({
       rscEnhancers={rscEnhancers}
     >
       <MissingRouteHandler>
-        <NativeInnerRouter
+        <InnerRouter
           frame={frame}
           setFrame={setFrame}
           serverFunctionRouting={serverFunctionRouting}
           fallbackRoute={initialRoute}
+          routeInterceptor={unstable_routeInterceptor}
         />
       </MissingRouteHandler>
     </ControlledRoot>
   );
 }
-
-export { NativeRouter as NativeRouter_UNSTABLE };
 
 export function INTERNAL_ServerRouter({ route }: { route: RouteProps }) {
   const routeElement = <Slot id={getRouteSlotId(route.path)} />;
@@ -564,6 +442,7 @@ export function INTERNAL_ServerRouter({ route }: { route: RouteProps }) {
         }}
       >
         {/* Match the client tree so useId stays stable during hydration. */}
+        <Connect connect={connectNothing} />
         <RouteIntent onError={() => {}} />
         <MissingRouteHandler>
           <Slot id="root">{routeElement}</Slot>

@@ -20,9 +20,10 @@ import {
   getRouteFromElements,
 } from '../isomorphic-utils/router-protocol.js';
 import { RouterContext } from './router-context.js';
-import { getRouterState } from './router-state.js';
 
 type Elements = Readonly<Record<string | symbol, unknown>>;
+
+const getNoRouteState = () => undefined;
 
 export function RouteIntent({
   onError,
@@ -33,7 +34,7 @@ export function RouteIntent({
   const router = use(RouterContext);
   const cache = useRouterCache();
   const getElements = router?.getElements;
-  const getState = router?.getRouteState ?? getRouterState;
+  const getState = router?.getRouteState ?? getNoRouteState;
   const handledIntents = useRef(new WeakSet<PromiseLike<string | undefined>>());
   const mounted = useRef(true);
   useEffect(() => {

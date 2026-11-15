@@ -5,7 +5,6 @@ import {
   collectEtags,
 } from '../src/minimal/client-utils/element-etags.js';
 import { buildMergePatch } from '../src/router/client-core-utils/merge-patch.js';
-import { ROUTER_STATE_ID } from '../src/router/client-utils/router-state.js';
 import {
   HAS404_ID,
   IS_STATIC_ID,
@@ -134,15 +133,16 @@ describe('buildMergePatch', () => {
     expect(IS_STATIC_ID in patch).toBe(false);
   });
 
-  it('does not write RouterState — that stays with the binding', () => {
-    const base = { page: 1, [ROUTER_STATE_ID]: 'state' };
+  it('does not carry symbol keys, which belong to the client', () => {
+    const clientKey = Symbol('client');
+    const base = { page: 1, [clientKey]: 'state' };
     const patch = buildMergePatch(
-      loaded('/next', { page: 1, [ROUTER_STATE_ID]: 'state' }),
+      loaded('/next', { page: 1, [clientKey]: 'state' }),
       base,
       base,
       { settled: route('/start') },
     );
-    expect(ROUTER_STATE_ID in patch).toBe(false);
+    expect(clientKey in patch).toBe(false);
   });
 
   it('uses outcome.route for the slot when the response has no ROUTE_ID', () => {

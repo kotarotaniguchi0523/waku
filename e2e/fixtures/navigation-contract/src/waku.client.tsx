@@ -1,7 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot, hydrateRoot } from 'react-dom/client';
 import { unstable_defaultRootOptions as defaultRootOptions } from 'waku/client';
-import { NativeRouter_UNSTABLE as Router } from 'waku/router/client';
+import { Router } from 'waku/router/client';
 
 const rootElement = (
   <StrictMode>
