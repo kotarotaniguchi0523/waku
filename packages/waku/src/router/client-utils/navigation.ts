@@ -385,7 +385,14 @@ function createNavigation(
             result.route,
             { shouldScroll: options.shouldScroll, history: 'replace' },
             result.url,
-            result,
+            // Slots are compared with what is shown now, which an instant
+            // preview has changed since the request started.
+            result.source.kind === 'response'
+              ? {
+                  ...result,
+                  source: { ...result.source, base: current.elements },
+                }
+              : result,
           ),
         );
       } else {
