@@ -1,7 +1,10 @@
 'use server';
 
-import { requestRefresh } from 'waku/router/server';
-import { incrementCount } from './counter.js';
+import {
+  requestRefresh,
+  unstable_rerenderRoute as rerenderRoute,
+} from 'waku/router/server';
+import { armRenderFailure, incrementCount } from './counter.js';
 import { waitForGate } from './gate.js';
 
 export const increment = async () => {
@@ -16,4 +19,18 @@ export const gatedIncrement = async (gateId: string) => {
   const next = incrementCount();
   requestRefresh();
   return next;
+};
+
+// Answers with a fresh render of the counter route itself.
+export const incrementAndRerender = async () => {
+  const next = incrementCount();
+  rerenderRoute('/counter');
+  return next;
+};
+
+// Refreshes the route, whose next render fails.
+export const refreshIntoFailure = async () => {
+  armRenderFailure();
+  requestRefresh();
+  return 'refreshed';
 };

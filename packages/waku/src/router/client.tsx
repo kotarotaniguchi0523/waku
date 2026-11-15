@@ -269,7 +269,8 @@ const InnerRouter = ({
     changeRoute,
     getElements,
     getRouteState,
-    isCurrentRoute,
+    getScope,
+    isCurrentScope,
   } = useNavigation(
     frame,
     setFrame,
@@ -279,19 +280,20 @@ const InnerRouter = ({
     routeInterceptor,
   );
 
+  // An intent's failure is shown until another navigation is on screen.
   const [intentError, setIntentError] = useState<{
     error: unknown;
-    scope: ReturnType<typeof getRouteState>;
+    navigation: number;
   }>();
   const onIntentError = useCallback(
-    (error: unknown, source: Elements) => {
-      setIntentError({ error, scope: getRouteState(source) });
+    (error: unknown) => {
+      setIntentError({ error, navigation: getScope().navigation });
     },
-    [getRouteState],
+    [getScope],
   );
   const error =
     frame.error ??
-    (intentError?.scope === frame.state ? intentError : undefined);
+    (intentError?.navigation === frame.commitId ? intentError : undefined);
 
   const navigate = useCallback<RouterHost['navigate']>(
     async (href, opts) => {
@@ -326,7 +328,8 @@ const InnerRouter = ({
         changeRoute,
         getElements,
         getRouteState,
-        isCurrentRoute,
+        getScope,
+        isCurrentScope,
       }}
     >
       <RouterHostContext value={host}>
@@ -368,8 +371,10 @@ export function Router({
   unstable_rscEnhancers?: readonly Unstable_RscEnhancer[];
   /**
    * Intercepts Back and Forward; programmatic navigation and link clicks are
-   * not intercepted. Return `false` to ignore the traversal (the address bar
-   * has already moved); otherwise return the route to render.
+   * not intercepted. It is called with the destination's route before the
+   * address bar moves. Return `false` to stay on the current entry, the
+   * route itself to go there, or another route to show that one in its
+   * place.
    */
   unstable_routeInterceptor?: (route: RouteProps) => RouteProps | false;
 }) {

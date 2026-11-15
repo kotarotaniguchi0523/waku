@@ -40,6 +40,12 @@ change touches them.
 - Once a navigation has moved the URL, only a later navigation that moves the
   URL can drop it.
 - A response is cancelled only until React has it.
+- A late redirect or not-found is followed only from the place it came from:
+  the displayed route's own intent survives a fragment change, an intent from
+  a partial response does not, and neither is followed while another
+  navigation is loading.
+- When Back or Forward is refused, the address bar stays on, or returns to,
+  the entry whose content is shown.
 - Every attempt settles: abort, error and unmount leave nothing pending.
 - Navigation works with prefetching and instant navigation turned off.
 - A slot the server omitted because the client already holds it is kept.

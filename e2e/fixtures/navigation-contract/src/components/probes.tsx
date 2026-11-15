@@ -2,7 +2,12 @@
 
 import { useState, useSyncExternalStore, useTransition } from 'react';
 import { useRouter } from 'waku';
-import { gatedIncrement, increment } from '../lib/actions.js';
+import {
+  gatedIncrement,
+  increment,
+  incrementAndRerender,
+  refreshIntoFailure,
+} from '../lib/actions.js';
 
 const subscribeNever = () => () => {};
 
@@ -73,6 +78,24 @@ export const ActionPanel = () => {
           Gated increment {gateId}
         </button>
       ))}
+      <button
+        type="button"
+        data-testid="run-increment-and-rerender"
+        onClick={async () => {
+          setActionResult(String(await incrementAndRerender()));
+        }}
+      >
+        Increment and rerender
+      </button>
+      <button
+        type="button"
+        data-testid="run-refresh-into-failure"
+        onClick={async () => {
+          setActionResult(await refreshIntoFailure());
+        }}
+      >
+        Refresh into failure
+      </button>
       <p data-testid="action-result">{actionResult}</p>
     </div>
   );

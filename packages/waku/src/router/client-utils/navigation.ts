@@ -3,8 +3,8 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
-  useState,
 } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import {
@@ -43,7 +43,11 @@ import {
   isStaticFromElements,
 } from '../isomorphic-utils/router-protocol.js';
 import { dispatchChangeRoute } from './router-context.js';
-import type { ChangeRoute, ChangeRouteOptions } from './router-context.js';
+import type {
+  ChangeRoute,
+  ChangeRouteOptions,
+  RouteScope,
+} from './router-context.js';
 import { createRouterState, resolveServerRedirect } from './router-state.js';
 import type { RouterState } from './router-state.js';
 import {
@@ -96,6 +100,13 @@ type Attempt = {
    * the URL itself does, so the content always catches up with the URL.
    */
   ownsUrl: boolean;
+  /**
+   * Resolved when React commits a frame of this attempt. There can be more
+   * than one: an instant navigation queues a preview and then its fill.
+   */
+  commitWaiters: Set<() => void>;
+  /** The route of the frame this attempt has queued, once it has one. */
+  accepted?: RouteProps;
 };
 
 // Carried through `navigation.navigate()` so the navigate listener can tell
@@ -107,6 +118,9 @@ class RequestInfo {
     readonly settle: PromiseWithResolvers<void>,
   ) {}
 }
+
+// Marks the traversal that returns to the shown entry after a refused one.
+const RETURN = { wakuReturn: true } as const;
 
 // Marks a navigation the router hands to the browser as a document load.
 const HANDOFF = { wakuHandoff: true } as const;
@@ -178,64 +192,58 @@ export function useNavigation(
 
   // What the last commit showed. Navigation decisions read this, never the
   // render in progress.
-  const committedRef = useRef({ elements, route, state: frame.state });
-  const [stateByElements] = useState(
-    () => new WeakMap<Elements, RouterState | undefined>(),
+  const { commitId, error, state } = frame;
+  // Replaced for each navigation shown and for each fragment change.
+  const scope = useMemo(
+    (): RouteScope => ({ navigation: commitId, state }),
+    [commitId, state],
   );
+  const committedRef = useRef({ elements, route, state, scope });
+  // The newest attempt that has not been shown or dropped yet.
   const pendingRef = useRef<Attempt>(undefined);
   const liveAttemptsRef = useRef(new Set<Attempt>());
-  const queuedRouteRef = useRef<{ id: number; route: RouteProps }>(undefined);
   // Set when a server function's refresh of this route arrived during a
   // navigation and was therefore not applied. If that navigation ends up
   // abandoned, the route is refetched so the refresh is not lost.
   const refreshOwedRef = useRef(false);
   const refreshAbandonedRef = useRef<() => void>(undefined);
   const nextIdRef = useRef(0);
-  // A navigation can queue more than one frame (an instant preview and its
-  // fill), so each id holds every waiter still open.
-  const commitWaitersRef = useRef(new Map<number, Set<() => void>>());
-  const { commitId, error } = frame;
   useLayoutEffect(() => {
-    committedRef.current = { elements, route, state: frame.state };
-    stateByElements.set(elements, frame.state);
+    committedRef.current = { elements, route, state, scope };
     if (pendingRef.current?.id === commitId) {
       pendingRef.current = undefined;
-    }
-    if (queuedRouteRef.current?.id === commitId) {
-      queuedRouteRef.current = undefined;
     }
     if (!error) {
       cache.learnStaticFromElements(elements);
     }
     // Lets the browser finish the navigation this frame belongs to.
-    for (const resolve of commitWaitersRef.current.get(commitId) ?? []) {
-      resolve();
+    for (const attempt of liveAttemptsRef.current) {
+      if (attempt.id === commitId) {
+        for (const resolve of attempt.commitWaiters) {
+          resolve();
+        }
+        attempt.commitWaiters.clear();
+      }
     }
-    commitWaitersRef.current.delete(commitId);
-  }, [cache, elements, route, frame.state, commitId, error, stateByElements]);
+  }, [cache, elements, route, state, scope, commitId, error]);
 
   const getElements = useCallback(() => committedRef.current.elements, []);
   const getSettledRoute = useCallback(() => committedRef.current.route, []);
-  const getRouteState = useCallback(
-    (source: Elements) => stateByElements.get(source),
-    [stateByElements],
-  );
-  const isCurrentRoute = useCallback(
-    (source: Elements) => {
-      const committed = committedRef.current;
-      return (
-        committed.state === stateByElements.get(source) &&
-        committed.elements[INTENT_ID] === source[INTENT_ID] &&
-        !pendingRef.current
-      );
-    },
-    [stateByElements],
-  );
+  const getRouteState = useCallback(() => committedRef.current.state, []);
+  const getScope = useCallback(() => committedRef.current.scope, []);
+  const isCurrentScope = useCallback((captured: RouteScope, exact: boolean) => {
+    const current = committedRef.current.scope;
+    return (
+      (exact
+        ? captured === current
+        : captured.navigation === current.navigation) && !pendingRef.current
+    );
+  }, []);
 
   // During development a reload refetches the route the user is heading
   // for: one already accepted but not painted yet, or else the one shown.
   const getRefetchRoute = useCallback(
-    () => queuedRouteRef.current?.route ?? committedRef.current.route,
+    () => pendingRef.current?.accepted ?? committedRef.current.route,
     [],
   );
   // A navigation still waiting for its response was requested from code
@@ -487,17 +495,15 @@ export function useNavigation(
         throw abortError();
       }
       const committed = new Promise<void>((resolve, reject) => {
-        const waiters = commitWaitersRef.current.get(attempt.id) ?? new Set();
-        waiters.add(resolve);
-        commitWaitersRef.current.set(attempt.id, waiters);
+        attempt.commitWaiters.add(resolve);
         attempt.signal.addEventListener('abort', () => {
-          commitWaitersRef.current.delete(attempt.id);
+          attempt.commitWaiters.delete(resolve);
           reject(abortError());
         });
       });
       ignoreRejection(committed);
       if (prepared.kind === 'render') {
-        queuedRouteRef.current = { id: attempt.id, route: prepared.route };
+        attempt.accepted = prepared.route;
         if (prepared.fetched) {
           refreshOwedRef.current = false;
         }
@@ -555,6 +561,7 @@ export function useNavigation(
         signal: controller.signal,
         target,
         ownsUrl: false,
+        commitWaiters: new Set(),
       };
       liveAttemptsRef.current.add(attempt);
       pendingRef.current = attempt;
@@ -564,9 +571,6 @@ export function useNavigation(
       }
       controller.signal.addEventListener('abort', () => {
         liveAttemptsRef.current.delete(attempt);
-        if (queuedRouteRef.current?.id === attempt.id) {
-          queuedRouteRef.current = undefined;
-        }
         if (pendingRef.current === attempt) {
           pendingRef.current = undefined;
           if (refreshOwedRef.current) {
@@ -630,10 +634,8 @@ export function useNavigation(
           void window.navigation.reload({ info: HANDOFF });
           return;
         }
+        // A failed load becomes an error frame, which the boundary shows.
         ignoreRejection(accept(attempt, prepared));
-        if (prepared.kind === 'failed') {
-          throw prepared.error;
-        }
       } catch (e) {
         if (attempt.signal.aborted) {
           options.onSuperseded?.();
@@ -669,6 +671,13 @@ export function useNavigation(
     [applyInPlace, setFrame],
   );
 
+  // A dropped update is expected. Anything else would otherwise disappear
+  // without a trace.
+  const reportUnlessHandled = useCallback((error: unknown) => {
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      console.error('Error while applying a route update:', error);
+    }
+  }, []);
   const applyRouteResponse = useCallback(
     async (responseElements: Elements) => {
       const nextRoute = getRouteFromElements(responseElements)!;
@@ -683,17 +692,13 @@ export function useNavigation(
         shouldScroll: false,
         history: sameRoute || is404 ? null : 'push',
         ...(is404 ? { url: new URL(window.location.href) } : {}),
-      }).catch(() => {});
+      }).catch(reportUnlessHandled);
     },
-    [changeRoute, getSettledRoute],
+    [changeRoute, getSettledRoute, reportUnlessHandled],
   );
-  const getPendingRoute = useCallback(() => {
-    const target = pendingRef.current?.target;
-    if (target) {
-      // The caller drops a refresh of the shown route while this is set.
-      refreshOwedRef.current = true;
-    }
-    return target;
+  const getPendingRoute = useCallback(() => pendingRef.current?.target, []);
+  const onOriginRerenderDropped = useCallback(() => {
+    refreshOwedRef.current = true;
   }, []);
   useEffect(() => {
     refreshAbandonedRef.current = () => {
@@ -702,14 +707,15 @@ export function useNavigation(
           refetch: true,
           shouldScroll: false,
           history: null,
-        }).catch(() => {});
+        }).catch(reportUnlessHandled);
       });
     };
-  }, [applyInPlace]);
+  }, [applyInPlace, reportUnlessHandled]);
   useServerFunctionRouting(serverFunctionRouting, {
     getSettledRoute,
     getPendingRoute,
     applyRouteResponse,
+    onOriginRerenderDropped,
   });
 
   // Starts listening to the browser. The caller runs this from the first
@@ -728,6 +734,11 @@ export function useNavigation(
         event.downloadRequest !== null ||
         event.formData
       ) {
+        return;
+      }
+      if (event.info === RETURN) {
+        // Nothing changes on screen; only the address bar goes back.
+        event.intercept({ scroll: 'manual', focusReset: 'manual' });
         return;
       }
       if (isExternalLink(event.sourceElement)) {
@@ -755,6 +766,52 @@ export function useNavigation(
       }
       const url = new URL(event.destination.url);
       const requestedRoute = info?.route ?? parseRoute(url);
+      if (event.navigationType === 'traverse' && routeInterceptorRef.current) {
+        // Back and Forward can be refused or pointed at another route. The
+        // decision is made now, before the address bar moves.
+        const decided = routeInterceptorRef.current(requestedRoute);
+        if (!decided) {
+          if (event.cancelable) {
+            event.preventDefault();
+          } else {
+            // The browser moves regardless. Go along, then return to the
+            // entry still on screen, so the address bar keeps matching it.
+            const shown = navigation.currentEntry?.key;
+            event.intercept({
+              scroll: 'manual',
+              focusReset: 'manual',
+              handler: async () => {
+                if (shown !== undefined) {
+                  setTimeout(() => {
+                    const back = navigation.traverseTo(shown, { info: RETURN });
+                    ignoreRejection(back.committed);
+                    ignoreRejection(back.finished);
+                  });
+                }
+              },
+            });
+          }
+          return;
+        }
+        if (!isSameRoute(decided, requestedRoute)) {
+          event.intercept({
+            scroll: 'manual',
+            focusReset: 'manual',
+            handler: async () => {
+              startTransition(() => {
+                void changeRoute(decided, {
+                  shouldScroll: shouldScrollForRouteChange(
+                    decided,
+                    committedRef.current.route,
+                  ),
+                  history: 'replace',
+                }).catch(reportUnlessHandled);
+              });
+            },
+          });
+          return;
+        }
+      }
       const nextRoute = requestedRoute;
       const options: ChangeRouteOptions = info?.options ?? {
         // Back and Forward between entries that differ only in the query stay
@@ -946,36 +1003,9 @@ export function useNavigation(
       }
 
       // The browser has already decided to move (Back, Forward, reload).
-      const interceptor =
-        event.navigationType === 'traverse'
-          ? routeInterceptorRef.current
-          : undefined;
       event.intercept({
-        // With an interceptor the outcome is not known yet, so the browser
-        // must not scroll on its own.
-        ...(interceptor
-          ? ({ scroll: 'manual', focusReset: 'manual' } as const)
-          : behavior),
+        ...behavior,
         handler: async () => {
-          if (interceptor) {
-            // The address bar has moved; the app decides what it shows.
-            const decided = interceptor(nextRoute);
-            if (!decided || !isSameRoute(decided, nextRoute)) {
-              attempt.controller.abort();
-              if (decided) {
-                startTransition(() => {
-                  void changeRoute(decided, {
-                    shouldScroll: shouldScrollForRouteChange(
-                      decided,
-                      committedRef.current.route,
-                    ),
-                    history: 'replace',
-                  }).catch(() => {});
-                });
-              }
-              return;
-            }
-          }
           takeUrl(attempt);
           let result: Prepared;
           try {
@@ -996,9 +1026,6 @@ export function useNavigation(
             return;
           }
           await show(result);
-          if (interceptor && options.shouldScroll) {
-            event.scroll();
-          }
         },
       });
     };
@@ -1054,6 +1081,7 @@ export function useNavigation(
     changeRoute,
     prepare,
     setFrame,
+    reportUnlessHandled,
     startAttempt,
     startPreview,
     takeUrl,
@@ -1065,6 +1093,7 @@ export function useNavigation(
     changeRoute,
     getElements,
     getRouteState,
-    isCurrentRoute,
+    getScope,
+    isCurrentScope,
   };
 }

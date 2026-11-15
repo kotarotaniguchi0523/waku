@@ -19,17 +19,30 @@ export type ChangeRoute = (
   options: ChangeRouteOptions,
 ) => Promise<void>;
 
+/**
+ * A token for the displayed content. A new one is issued for each
+ * navigation shown and for each fragment change; `navigation` stays the
+ * same across fragment changes on one route.
+ */
+export type RouteScope = {
+  readonly navigation: number;
+  /** The request the displayed route was loaded for. */
+  readonly state: RouterState | undefined;
+};
+
 export const RouterContext = createContext<{
   route: RouteProps;
   changeRoute: ChangeRoute;
   getElements?: () => Record<string, unknown>;
-  isCurrentRoute?: (
-    source: Readonly<Record<string | symbol, unknown>>,
-  ) => boolean;
-  /** The request an element record was committed for. */
-  getRouteState?: (
-    source: Readonly<Record<string | symbol, unknown>>,
-  ) => RouterState | undefined;
+  /** Identifies what is on screen now, for work that must not outlive it. */
+  getScope?: () => RouteScope;
+  /**
+   * Whether `scope` still describes what is on screen and no navigation is
+   * loading. With `exact`, a fragment change since then also ends it.
+   */
+  isCurrentScope?: (scope: RouteScope, exact: boolean) => boolean;
+  /** The request the displayed route was loaded for. */
+  getRouteState?: () => RouterState | undefined;
 } | null>(null);
 
 export function dispatchChangeRoute(

@@ -433,6 +433,20 @@ parts that need the server left pending. The response then fills them in. A
 redirect found afterwards replaces the entry, since the URL has already moved.
 
 Back and Forward restore the scroll position of the entry they return to.
+Between entries that differ only in the query, the position is kept.
+
+A redirect or not-found intent that settles after its content is on screen is
+followed only while the place it came from is still current, and never while
+another navigation is loading. The displayed route's own intent stays current
+across fragment changes, which keep the user on that route, and ends when
+another navigation is shown. An intent from a partial response, such as a
+slice or a server function that returned no route, ends with any later
+navigation, a fragment change included.
+
+`unstable_routeInterceptor` is called for Back and Forward before the address
+bar moves. When it refuses, the traversal is cancelled where the browser
+allows that; otherwise the router goes along and then returns to the entry
+still on screen, so the address bar keeps matching the content.
 
 RSC hot reload refetches a destination that has been accepted but not painted,
 or else the visible route, and retires navigations still waiting for a

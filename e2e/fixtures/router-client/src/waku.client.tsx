@@ -18,9 +18,8 @@ const rscEnhancer: Unstable_RscEnhancer = (next) => (path, params, options) =>
   });
 
 const routeInterceptor = (route: RouteProps) => {
-  const interceptor = new URL(window.location.href).searchParams.get(
-    '__interceptor',
-  );
+  // Decided from the destination, which the address bar has not reached yet.
+  const interceptor = new URLSearchParams(route.query).get('__interceptor');
   if (interceptor === 'block') {
     return false;
   }

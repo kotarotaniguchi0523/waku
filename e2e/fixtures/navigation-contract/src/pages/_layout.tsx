@@ -10,7 +10,8 @@ import {
 
 const gatedIds = ['t01b', 't05b', 't06', 't06b', 't08', 'g2'];
 const gatedChildIds = ['t04'];
-const heldRequestIds = ['t01', 't05'];
+const heldRequestIds = ['t01', 't05', 'i3', 'a1'];
+const lateRedirectIds = ['i1', 'i2', 'i3', 'i4'];
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
@@ -64,6 +65,15 @@ export default function Layout({ children }: { children: ReactNode }) {
             data-testid={`go-held-request-${id}`}
           >
             Held request {id}
+          </Link>
+        ))}
+        {lateRedirectIds.map((id) => (
+          <Link
+            key={id}
+            to={`/late-redirect?gate=${id}`}
+            data-testid={`go-late-redirect-${id}`}
+          >
+            Late redirect {id}
           </Link>
         ))}
         {gatedChildIds.map((id) => (

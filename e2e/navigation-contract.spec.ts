@@ -389,6 +389,95 @@ test.describe('navigation-contract', () => {
     await expect(page.getByTestId('hydrated')).toHaveText('yes');
   });
 
+  test('A1: an action that rerenders the route replaces a navigation still waiting for its response', async ({
+    page,
+  }) => {
+    await open(page, '/counter');
+    const before = Number(await page.getByTestId('count').textContent());
+    await clickWithoutWaiting(page, 'go-held-request-a1');
+    await waitUntilHeld(page, 'a1');
+    await page.getByTestId('run-increment-and-rerender').dispatchEvent('click');
+    await expect(page.getByTestId('count')).toHaveText(String(before + 1));
+    await expect(page).toHaveURL(`${origin()}/counter`);
+    await releaseGate(page, 'a1');
+    // A refresh round trip gives the dropped response time to arrive.
+    await page.getByTestId('run-increment').click();
+    await expect(page.getByTestId('count')).toHaveText(String(before + 2));
+    await expect(shownPage(page)).toHaveText('counter');
+    await expect(page).toHaveURL(`${origin()}/counter`);
+  });
+
+  test('A2: a refresh whose render fails shows the error at the same address, and the app recovers', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-counter').click();
+    await expect(shownPage(page)).toHaveText('counter');
+    await page.getByTestId('run-refresh-into-failure').click();
+    await expect(shownPage(page)).toHaveCount(0);
+    await expect(page).toHaveURL(`${origin()}/counter`);
+    await page.goBack();
+    await expect(shownPage(page)).toHaveText('home');
+    await page.goForward();
+    await expect(shownPage(page)).toHaveText('counter');
+    await expect(page).toHaveURL(`${origin()}/counter`);
+  });
+
+  test('I1: a redirect that arrives after the page is shown is followed', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-late-redirect-i1').click();
+    await expect(shownPage(page)).toHaveText('late-redirect');
+    await releaseGate(page, 'i1');
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+  });
+
+  test('I2: a late redirect from a page the user has left is ignored', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-late-redirect-i2').click();
+    await expect(shownPage(page)).toHaveText('late-redirect');
+    await page.getByTestId('go-counter').click();
+    await expect(shownPage(page)).toHaveText('counter');
+    await releaseGate(page, 'i2');
+    // A refresh round trip gives the late redirect time to arrive.
+    await page.getByTestId('run-increment').click();
+    await expect(page.getByTestId('action-result')).not.toHaveText('none');
+    await expect(shownPage(page)).toHaveText('counter');
+    await expect(page).toHaveURL(`${origin()}/counter`);
+  });
+
+  test('I3: a late redirect does not replace a newer navigation that is still loading', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-late-redirect-i3').click();
+    await expect(shownPage(page)).toHaveText('late-redirect');
+    await clickWithoutWaiting(page, 'go-held-request-i3');
+    await waitUntilHeld(page, 'i3');
+    await releaseGate(page, 'i3');
+    await expect(shownPage(page)).toHaveText('held-request');
+    await expect(page).toHaveURL(`${origin()}/held-request?hold=i3`);
+  });
+
+  test('I4: a fragment change does not cancel the late redirect of the page it stays on', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-late-redirect-i4').click();
+    await expect(shownPage(page)).toHaveText('late-redirect');
+    await page.evaluate(() => {
+      location.hash = 'details';
+    });
+    await expect(page.getByTestId('route-hash')).toHaveText('#details');
+    await releaseGate(page, 'i4');
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+  });
+
   // Without an error boundary of its own, content that fails after the page
   // is on screen takes the page down with it, like a page that fails outright.
   test('G7: content that fails after the page is shown leaves the address bar and Back recovers', async ({

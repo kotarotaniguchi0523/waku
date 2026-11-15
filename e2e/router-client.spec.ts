@@ -148,6 +148,12 @@ test.describe('router-client', () => {
     await expect(page.getByRole('heading', { name: 'Start' })).toBeVisible();
     await expect(page.getByTestId('route-path')).toHaveText('/start');
     await expect(page.getByTestId('route-query')).toHaveText('');
+    // The address bar stays on the entry whose page is shown.
+    await expect
+      .poll(() => page.evaluate(() => location.pathname + location.search))
+      .toBe('/start');
+    // The refused entry is still there: Forward is not offered, Back is.
+    expect(await page.evaluate(() => window.navigation.canGoBack)).toBe(true);
   });
 
   test('concurrent Router mounts settle with different initial routes', async ({
@@ -211,6 +217,9 @@ test.describe('router-client', () => {
       'from=interceptor',
     );
     await waitForSelectorText(page, 'h1', 'Intercepted');
+    await expect
+      .poll(() => page.evaluate(() => location.pathname + location.search))
+      .toBe('/intercepted?from=interceptor');
   });
 
   // Playwright's click() scrolls its target into view, which would move the
