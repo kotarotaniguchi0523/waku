@@ -11,7 +11,8 @@ import { has404FromElements } from '../isomorphic-utils/router-protocol.js';
 import { routeOf } from './frame.js';
 import type { Elements, RenderFrame } from './frame.js';
 import { createNavigation } from './navigation.js';
-import type { Committed, Interceptor } from './request.js';
+import type { Committed } from './navigation.js';
+import type { Interceptor } from './traversal-guard.js';
 
 /**
  * Creates the navigation binding for one Router and tells it what each

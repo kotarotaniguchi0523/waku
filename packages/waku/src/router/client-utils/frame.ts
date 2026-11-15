@@ -67,9 +67,9 @@ export type Outcome =
       readonly source:
         | { readonly kind: 'known' }
         | {
-            /** A server response, requested while `base` was shown. */
+            /** A server response for `requested`, asked for while `base` was shown. */
             readonly kind: 'response';
-            readonly route: RouteProps;
+            readonly requested: RouteProps;
             readonly base: Elements;
           };
     }
@@ -185,7 +185,6 @@ export function nextFrame(
       return {
         ...routed,
         kind: 'failed',
-        route: outcome.route,
         elements: prev.elements,
         error: outcome.error,
       };
@@ -220,7 +219,7 @@ export function nextFrame(
           return combineElements(
             current,
             buildMergePatch(
-              { route: source.route, elements: patch },
+              { route: source.requested, elements: patch },
               current,
               source.base,
               { settled: at.settled },
@@ -233,6 +232,12 @@ export function nextFrame(
       return outcome satisfies never;
   }
 }
+
+/** Replaces the elements of a frame and keeps everything else. */
+export const withElements = (
+  prev: RenderFrame,
+  update: (elements: Promise<Elements>) => Promise<Elements>,
+): RenderFrame => ({ ...prev, elements: update(prev.elements) });
 
 /**
  * Records a fragment-only navigation, which the router does not intercept.

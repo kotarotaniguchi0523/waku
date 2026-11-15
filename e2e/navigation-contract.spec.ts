@@ -611,6 +611,27 @@ test.describe('navigation-contract', () => {
     await expect(page.locator('body')).toHaveText('echo: posted');
   });
 
+  test('location.reload() from application code loads the document again', async ({
+    page,
+  }) => {
+    await open(page, '/plain');
+    await page.evaluate(() => {
+      (window as { __beforeReload?: boolean }).__beforeReload = true;
+      window.location.reload();
+    });
+    await expect
+      .poll(() =>
+        page
+          .evaluate(
+            () => (window as { __beforeReload?: boolean }).__beforeReload,
+          )
+          .catch(() => true),
+      )
+      .toBeUndefined();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+  });
+
   test('T20: a form get navigates in the app', async ({ page }) => {
     await open(page, '/');
     await page.getByTestId('get-form').click();

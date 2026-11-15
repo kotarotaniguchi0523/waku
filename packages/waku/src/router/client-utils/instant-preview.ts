@@ -37,8 +37,8 @@ export function startPreview(
   | undefined {
   const { route, url } = request;
   if (
-    request.adopt !== undefined ||
-    request.follows ||
+    request.source.kind !== 'fetch' ||
+    request.source.follows > 0 ||
     request.refetch === false ||
     isSameRscRoute(route, shown.route) ||
     cache.canReuseStaticRoute(route, shown.elements) ||

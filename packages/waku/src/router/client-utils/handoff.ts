@@ -1,6 +1,6 @@
 import { isSameOrigin } from '../client-core-utils/route-url.js';
 import type { Outcome } from './frame.js';
-import { ignoreRejection } from './promises.js';
+import { ignoreResult } from './promises.js';
 
 /** Marks a navigation the router hands to the browser as a document load. */
 export const HANDOFF = { wakuHandoff: true } as const;
@@ -28,15 +28,13 @@ export function handOff(
   if (outcome.kind === 'reload' && outcome.url.href === window.location.href) {
     // Navigating to the URL already shown would not load a document when
     // it has a fragment.
-    const reloading = window.navigation.reload({ info: HANDOFF });
-    ignoreRejection(reloading.committed);
-    ignoreRejection(reloading.finished);
+    ignoreResult(window.navigation.reload({ info: HANDOFF }));
     return;
   }
-  const result = window.navigation.navigate(
-    outcome.kind === 'leave' ? outcome.location.href : outcome.url.href,
-    { info: HANDOFF, history: push ? 'push' : 'replace' },
+  ignoreResult(
+    window.navigation.navigate(
+      outcome.kind === 'leave' ? outcome.location.href : outcome.url.href,
+      { info: HANDOFF, history: push ? 'push' : 'replace' },
+    ),
   );
-  ignoreRejection(result.committed);
-  ignoreRejection(result.finished);
 }

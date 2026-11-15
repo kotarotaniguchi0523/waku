@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest';
-import { createAttempts } from '../src/router/client-utils/attempts.js';
+import {
+  SUPERSEDED,
+  createAttempts,
+} from '../src/router/client-utils/attempts.js';
 
 const route = (path: string) => ({ path, query: '', hash: '' });
 
@@ -38,7 +41,7 @@ describe('attempts', () => {
     const attempts = createAttempts();
     const first = attempts.start(route('/a'));
     attempts.own(first);
-    attempts.committed(first.id, true);
+    attempts.release(first.id);
     expect(attempts.pending(first.id)).toBeUndefined();
     attempts.own(attempts.start(route('/b')));
     expect(first.signal.aborted).toBe(false);
@@ -48,7 +51,6 @@ describe('attempts', () => {
     const attempts = createAttempts();
     const first = attempts.start(route('/a'));
     attempts.own(first);
-    attempts.committed(first.id, false);
     expect(attempts.pending(first.id)).toBeUndefined();
     attempts.own(attempts.start(route('/b')));
     expect(first.signal.aborted).toBe(true);
@@ -78,9 +80,33 @@ describe('attempts', () => {
   test('the queued route is that of the navigation that moved the URL', () => {
     const attempts = createAttempts();
     const owner = attempts.start(route('/a'));
-    attempts.own(owner);
+    attempts.queue(owner, route('/a'));
     expect(attempts.queuedRoute()).toBeUndefined();
-    owner.queued = route('/a');
+    attempts.own(owner);
+    attempts.queue(owner, route('/a'));
     expect(attempts.queuedRoute()).toEqual(route('/a'));
+    attempts.release(owner.id);
+    expect(attempts.queuedRoute()).toBeUndefined();
+  });
+
+  test('an older navigation that moves the URL leaves a newer loading one alone', () => {
+    const attempts = createAttempts();
+    const older = attempts.start(route('/a'));
+    attempts.own(older);
+    const newer = attempts.start(route('/b'));
+    attempts.own(older);
+    expect(newer.signal.aborted).toBe(false);
+    expect(attempts.isLoading(newer)).toBe(true);
+  });
+
+  test('a displaced navigation is superseded; one that ends itself is not', () => {
+    const attempts = createAttempts();
+    const displaced = attempts.start(route('/a'));
+    const ended = attempts.start(route('/b'));
+    expect(displaced.signal.reason).toBe(SUPERSEDED);
+    const error = new Error('failed');
+    ended.abort(error);
+    expect(ended.signal.reason).toBe(error);
+    expect(attempts.pending(0)).toBeUndefined();
   });
 });

@@ -18,9 +18,11 @@ Six rules describe the client router. Read them before changing it.
 A normal navigation is these files:
 
 1. `client-utils/navigate-listener.ts`: what happens on a `navigate` event.
-   It starts an attempt, resolves the route once, and shows the result. The
-   same promise is awaited before the URL moves (push, replace) and after
-   (Back, Forward, reload).
+   It starts an attempt, resolves the route once, and shows the result.
+   `nextStep()` decides what a result calls for: show it, move the entry to
+   another URL, or hand the destination to the browser. Push and replace
+   wait for the result before the URL moves; Back, Forward, reload and an
+   instant navigation after.
 2. `client-utils/resolve.ts`: request to outcome. It fetches and follows the
    route and touches neither the browser nor React.
 3. `client-utils/frame.ts`: `RenderFrame` and the functions that produce the
@@ -29,7 +31,7 @@ A normal navigation is these files:
 5. `client-utils/navigation.ts`: the binding that holds these together. It
    queues frames, applies updates that move nothing in the browser, and is
    what the rest of the router calls. `use-navigation.ts` creates it and
-   reports each commit to it; `request.ts` has the types they share.
+   reports each commit to it.
 
 Then, as needed:
 
@@ -53,31 +55,35 @@ well.
 `RenderFrame` is a union. Each shape holds only what exists in that state,
 so a combination that cannot happen cannot be written:
 
-| `kind`    | Meaning                                        | Has                        |
-| --------- | ---------------------------------------------- | -------------------------- |
-| `initial` | The document as served; nothing has navigated  | elements, scope            |
-| `preview` | An instant navigation shows the shell it holds | + route, origin, committed |
-| `ready`   | A navigation's response is shown               | + route, origin, committed |
-| `failed`  | A navigation could not load                    | + route, origin, error     |
+| `kind`    | Meaning                                        | Has                               |
+| --------- | ---------------------------------------------- | --------------------------------- |
+| `initial` | The document as served; nothing has navigated  | elements, scope                   |
+| `preview` | An instant navigation shows the shell it holds | + route, origin, committed        |
+| `ready`   | A navigation's response is shown               | + route, origin, committed        |
+| `failed`  | A navigation could not load                    | + route, origin, committed, error |
 
 Code that needs a field switches on `kind`; add a shape and the compiler
 points at every place that has to decide about it. Frames are created only by
 the functions in `frame.ts`.
 
-A navigation's result comes from one of three sources, also a union
-(`request.ts`): it is fetched, it adopts a response already on its way, or it
-was resolved by the navigation it replaces. Callers of `changeRoute` cannot
-set these.
+The same goes for the other types a navigation passes through. A request's
+`source` says where its elements come from: a fetch, or a response already on
+its way. An outcome is `render`, `preview`, `failed`, `leave` or `reload`. A
+step is `show`, `move` or `handOff`.
 
 An attempt is in one of two slots. `loading` has not moved the URL and is
 dropped by any newer navigation. `owner` has moved the URL and is replaced
 only by the next navigation that moves it. An attempt leaves its slot when
-its content is shown; nothing aborts it after that.
+its content is fully shown (for an instant navigation, when the response has
+filled in the preview); nothing aborts it after that. An attempt's abort
+reason says whether another navigation took its place, which is the only
+case reported as superseded.
 
 ## Tests
 
-- `tests/router-frame.test.ts`, `router-resolve.test.ts` and
-  `router-attempts.test.ts` check the pure parts through their inputs and
+- `tests/router-frame.test.ts`, `router-resolve.test.ts`,
+  `router-attempts.test.ts` and `router-next-step.test.ts` check the pure
+  parts through their inputs and
   outputs, with a fake server as the only stand-in. Start here: they run in
   a second.
 - `e2e/navigation-contract.spec.ts` checks the rules below from the outside:

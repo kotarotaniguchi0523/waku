@@ -1,105 +1,153 @@
-import { parseRoute } from '../client-core-utils/route-url.js';
+import type { RouterCache } from '../client-core-utils/caches.js';
+import { getRouteUrl, parseRoute } from '../client-core-utils/route-url.js';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
+import { SUPERSEDED } from './attempts.js';
 import type { Attempt, Attempts } from './attempts.js';
 import { isLeftToBrowser } from './browser-owned.js';
 import type { Outcome, Shown } from './frame.js';
 import { handOff } from './handoff.js';
 import { startPreview } from './instant-preview.js';
-import { abortError, ignoreRejection, isAbortError } from './promises.js';
-import { RequestInfo, fetched, toRequest } from './request.js';
-import type { Committed, Source } from './request.js';
-import { resolve } from './resolve.js';
-import type { ChangeRoute, ChangeRouteOptions } from './router-context.js';
+import { abortError, ignoreRejection, ignoreResult } from './promises.js';
+import { fetched, resolve } from './resolve.js';
+import type { Displayed, Source } from './resolve.js';
+import type { ChangeRouteOptions } from './router-context.js';
 import {
   scrollToHashWhenRendered,
   shouldScrollForRouteChange,
 } from './scroll.js';
-import { acceptReturn, guardTraversal } from './traversal-guard.js';
+import { acceptReturn, guardTraversal, quiet } from './traversal-guard.js';
+import type { Interceptor } from './traversal-guard.js';
 
-const quiet = { scroll: 'manual', focusReset: 'manual' } as const;
+type Rendered = Extract<Outcome, { kind: 'render' }>;
 
-const runNow = (update: () => void) => update();
+/** The abort reason of a navigation that became a document load. */
+const HANDED_OFF = Symbol('handed off');
 
-// A dropped update is expected. Anything else would otherwise disappear
-// without a trace.
-export const reportUnlessAborted = (error: unknown) => {
-  if (!isAbortError(error)) {
-    console.error('Error while applying a route update:', error);
+/** The options that apply to a navigation the browser carries out. */
+type Options = Pick<
+  ChangeRouteOptions,
+  'shouldScroll' | 'refetch' | 'instant' | 'onSuperseded'
+>;
+
+/** Where the result of a navigation the router asked for comes from. */
+type NavigationSource =
+  | Source
+  /** Resolved already, by the navigation this one replaces. */
+  | { readonly kind: 'resolved'; readonly outcome: Rendered };
+
+// Carried through `navigation.navigate()` so the listener can tell a
+// navigation this router asked for, and with which options and source.
+class RequestInfo {
+  constructor(
+    readonly route: RouteProps,
+    readonly options: Options,
+    readonly source: NavigationSource,
+    readonly settle: PromiseWithResolvers<void>,
+  ) {}
+}
+
+/**
+ * Asks the browser to navigate. The listener takes it from there and
+ * settles the returned promise: resolved once the result is queued or the
+ * navigation is dropped, rejected when the route fails to load.
+ */
+export function navigate(
+  route: RouteProps,
+  url: URL,
+  history: 'push' | 'replace',
+  options: Options,
+  source: NavigationSource,
+): Promise<void> {
+  const settle = Promise.withResolvers<void>();
+  ignoreResult(
+    window.navigation.navigate(url.href, {
+      history: history === 'replace' ? 'replace' : 'auto',
+      info: new RequestInfo(route, options, source, settle),
+    }),
+  );
+  return settle.promise;
+}
+
+/** What to do with a navigation's result. */
+export type Step =
+  /** Load the destination as a document. */
+  | { kind: 'handOff'; outcome: Extract<Outcome, { kind: 'leave' | 'reload' }> }
+  /** The result belongs at another URL than the entry is at. */
+  | { kind: 'move'; outcome: Rendered }
+  | { kind: 'show'; outcome: Shown };
+
+/** Decides the step for `outcome`, given the URL of the navigation's entry. */
+export const nextStep = (outcome: Outcome, entryUrl: string): Step => {
+  if (outcome.kind === 'leave' || outcome.kind === 'reload') {
+    return { kind: 'handOff', outcome };
   }
+  return outcome.kind === 'render' && outcome.url.href !== entryUrl
+    ? { kind: 'move', outcome }
+    : { kind: 'show', outcome };
 };
 
 /** What the listener needs from the binding. */
 export type Binding = {
   /** What the last commit showed. */
-  at: () => Committed;
+  at: () => Displayed & { cache: RouterCache; interceptor: Interceptor };
   attempts: Attempts;
   start: (route: RouteProps) => Attempt;
   /** Queues the frame for a result; settles when React has committed it. */
-  show: (
-    attempt: Attempt,
-    result: Shown,
-    schedule?: (update: () => void) => void,
-  ) => Promise<void>;
-  /** Asks the browser for a navigation with a known source. */
-  navigate: (
-    route: RouteProps,
-    options: ChangeRouteOptions,
-    url: URL,
-    source: Source,
-  ) => Promise<void>;
-  changeRoute: ChangeRoute;
+  show: (attempt: Attempt, result: Shown) => Promise<void>;
 };
 
 /**
  * What happens on a `navigate` event: decide whether the router takes it,
- * resolve the destination once, and show the result. Push and replace wait
- * for the result before the URL moves; Back, Forward and reload after.
+ * resolve the destination once, and show the result.
+ *
+ * Push and replace wait for the result before the URL moves, so the address
+ * bar and the content change together and a redirect leaves no entry of its
+ * own. Back, Forward and reload have already moved. An instant navigation
+ * moves at once too, shows the shell it holds, and fills it in afterwards.
  */
-export function createNavigateListener({
-  at,
-  attempts,
-  start,
-  show,
-  navigate,
-  changeRoute,
-}: Binding) {
+export function createNavigateListener({ at, attempts, start, show }: Binding) {
   return (event: NavigateEvent) => {
     const info = event.info instanceof RequestInfo ? event.info : undefined;
     if (isLeftToBrowser(event, !!info) || acceptReturn(event)) {
       return;
     }
     if (event.hashChange) {
-      // The browser scrolls to the fragment unless the caller opted out;
-      // `currententrychange` below records the new hash.
+      // The browser scrolls to the fragment unless the caller opted out.
+      // `currententrychange` records the new hash.
       if (info && !info.options.shouldScroll) {
         event.intercept(quiet);
       }
       info?.settle.resolve();
       return;
     }
-    const push = event.navigationType === 'push';
-    const replace = event.navigationType === 'replace';
     const url = new URL(event.destination.url);
     const route = info?.route ?? parseRoute(url);
     const showInstead = (decided: RouteProps) => {
+      const shouldScroll = shouldScrollForRouteChange(decided, at().route);
       ignoreRejection(
-        changeRoute(decided, {
-          shouldScroll: shouldScrollForRouteChange(decided, at().route),
-          history: 'replace',
-        }).catch(reportUnlessAborted),
+        navigate(
+          decided,
+          getRouteUrl(decided),
+          'replace',
+          { shouldScroll },
+          fetched,
+        ),
       );
     };
     if (guardTraversal(event, route, at().interceptor, showInstead)) {
       return;
     }
-    const options: ChangeRouteOptions = info?.options ?? {
+
+    const push = event.navigationType === 'push';
+    const pushOrReplace = push || event.navigationType === 'replace';
+    const options: Options = info?.options ?? {
       // Back and Forward between entries that differ only in the query stay
       // where the page is, like a query-only push.
       shouldScroll:
         event.navigationType !== 'traverse' ||
         shouldScrollForRouteChange(route, at().route),
-      history: replace ? 'replace' : 'push',
     };
+    const waitsBeforeCommit = event.cancelable && pushOrReplace;
 
     const attempt = start(route);
     event.signal.addEventListener('abort', () => {
@@ -109,10 +157,13 @@ export function createNavigateListener({
       }
     });
     attempt.signal.addEventListener('abort', () => {
-      options.onSuperseded?.();
-      // A superseded navigation counts as handled.
+      if (attempt.signal.reason === SUPERSEDED) {
+        options.onSuperseded?.();
+      }
+      // A dropped navigation counts as handled, unless it already failed.
       info?.settle.resolve();
     });
+    // Tells the caller of `push()` / `replace()`; without one, logs.
     const fail = (error: unknown) => {
       if (info) {
         info.settle.reject(error);
@@ -120,91 +171,95 @@ export function createNavigateListener({
         console.error('Error while navigating:', error);
       }
     };
+    // An error ends the navigation; no other navigation took its place.
+    const reporting =
+      <Args extends unknown[]>(run: (...args: Args) => Promise<void>) =>
+      async (...args: Args) => {
+        try {
+          await run(...args);
+        } catch (error) {
+          fail(error);
+          attempt.abort(error);
+          throw error;
+        }
+      };
 
-    // Push and replace wait for the result before the URL moves, so the
-    // address bar and the content change together and a redirect leaves no
-    // entry of its own. Back, Forward and reload have already moved.
-    const waitsBeforeCommit = event.cancelable && (push || replace);
     const source = info?.source ?? fetched;
-    const request = toRequest(route, url, options, source);
-    // With the destination's shell at hand, an instant navigation moves at
-    // once, shows the shell, and lets the response fill in the rest.
+    const request = {
+      route,
+      url,
+      scroll: options.shouldScroll,
+      refetch: options.refetch,
+    };
     const instant =
       options.instant && waitsBeforeCommit && source.kind === 'fetch'
-        ? startPreview(request, at(), at().cache, attempt.signal)
+        ? startPreview({ ...request, source }, at(), at().cache, attempt.signal)
         : undefined;
     // The result is resolved once; both handlers below wait for it.
     const outcome =
       source.kind === 'resolved'
         ? Promise.resolve(source.outcome)
         : resolve(
-            instant ? { ...request, adopt: instant.response } : request,
+            {
+              ...request,
+              source: instant
+                ? { kind: 'response', response: instant.response }
+                : source,
+            },
             at(),
             at().cache,
             attempt.signal,
           );
     ignoreRejection(outcome);
-    let committedUrl = event.destination.url;
+    // The URL this navigation's entry is at, or will be once it commits.
+    let entryUrl = event.destination.url;
 
-    // Shows a result and reports it to the caller of `push()` / `replace()`.
-    const present = async (
-      result: Shown,
-      schedule?: (update: () => void) => void,
-    ) => {
-      const committed = show(attempt, result, schedule);
-      // The frame is queued and the URL has moved: the caller can go on.
+    // Queues the frame for a result. With that, the caller can go on.
+    const present = (result: Shown) => {
+      const committed = show(attempt, result);
       if (result.kind === 'failed') {
         fail(result.error);
       } else {
         info?.settle.resolve();
       }
-      // Read while this navigation is still the browser's current one.
-      const transition = event.signal.aborted
-        ? undefined
-        : window.navigation.transition;
-      await committed;
-      if (
-        result.kind !== 'failed' &&
-        options.shouldScroll &&
-        (push || replace)
-      ) {
-        // After the browser's own scroll, which a late target missed.
-        transition?.finished.then(
-          () => scrollToHashWhenRendered(at().route.hash),
-          () => {},
-        );
-      }
+      return committed;
     };
 
     // After the URL has moved: leave, replace the entry, or show.
-    const finish = async (display: (result: Shown) => Promise<void> | void) => {
-      const result = await outcome;
-      if (result.kind === 'leave' || result.kind === 'reload') {
-        handOff(result, push);
-      } else if (result.kind === 'render' && result.url.href !== committedUrl) {
-        // The response names another route than this entry asked for.
-        // Replace the entry with a navigation that shows that response.
-        ignoreRejection(
-          navigate(
-            result.route,
-            { shouldScroll: options.shouldScroll, history: 'replace' },
-            result.url,
-            {
-              kind: 'resolved',
-              // Slots are compared with what is shown now, which an instant
-              // preview has changed since the request started.
-              outcome:
-                result.source.kind === 'response'
-                  ? {
-                      ...result,
-                      source: { ...result.source, base: at().elements },
-                    }
-                  : result,
-            },
-          ),
-        );
-      } else {
-        await display(result);
+    const finish = async () => {
+      const step = nextStep(await outcome, entryUrl);
+      switch (step.kind) {
+        case 'handOff':
+          // The entry is there already, so the document takes its place.
+          return handOff(step.outcome, false);
+        case 'move': {
+          const { outcome: result } = step;
+          // Replace the entry with a navigation that shows this result.
+          // Its slots are compared with what is shown now, which an instant
+          // preview has changed since the request started.
+          return ignoreRejection(
+            navigate(
+              result.route,
+              result.url,
+              'replace',
+              { shouldScroll: options.shouldScroll },
+              {
+                kind: 'resolved',
+                outcome:
+                  result.source.kind === 'response'
+                    ? {
+                        ...result,
+                        source: { ...result.source, base: at().elements },
+                      }
+                    : result,
+              },
+            ),
+          );
+        }
+        case 'show':
+          return present(step.outcome);
+        default:
+          return step satisfies never;
       }
     };
 
@@ -212,49 +267,46 @@ export function createNavigateListener({
       ...(options.shouldScroll ? {} : quiet),
       ...(waitsBeforeCommit && !instant
         ? {
-            precommitHandler: async (controller) => {
-              let result: Outcome;
-              try {
-                result = await outcome;
-              } catch (e) {
-                fail(e);
-                throw e;
-              }
-              if (result.kind === 'leave' || result.kind === 'reload') {
+            precommitHandler: reporting(async (controller) => {
+              const step = nextStep(await outcome, entryUrl);
+              if (step.kind === 'handOff') {
                 // Cancel this navigation first. A document navigation
                 // started while it is still being cancelled can be
                 // cancelled with it.
-                setTimeout(() => handOff(result, push));
+                setTimeout(() => handOff(step.outcome, push));
+                attempt.abort(HANDED_OFF);
                 throw abortError();
               }
-              if (result.url.href !== committedUrl) {
-                controller.redirect(result.url.href);
-                committedUrl = result.url.href;
+              if (step.kind === 'move') {
+                entryUrl = step.outcome.url.href;
+                controller.redirect(entryUrl);
               }
-            },
+            }),
           }
         : {}),
-      handler: async () => {
+      handler: reporting(async () => {
         attempts.own(attempt);
+        // This navigation's, read while it is the browser's current one.
+        const { transition } = window.navigation;
         if (instant) {
-          const previewed = present(instant.preview, runNow);
-          finish((result) => ignoreRejection(show(attempt, result))).catch(
-            (e) => {
-              if (!attempt.signal.aborted) {
-                fail(e);
-              }
-            },
+          await present(instant.preview);
+          finish().catch((error) => {
+            if (!attempt.signal.aborted) {
+              fail(error);
+            }
+          });
+        } else {
+          await finish();
+        }
+        if (options.shouldScroll && pushOrReplace) {
+          // After the browser's own scroll, which misses a fragment target
+          // that renders late.
+          transition?.finished.then(
+            () => scrollToHashWhenRendered(at().route.hash),
+            () => {},
           );
-          await previewed;
-          return;
         }
-        try {
-          await finish(present);
-        } catch (e) {
-          fail(e);
-          throw e;
-        }
-      },
+      }),
     });
   };
 }

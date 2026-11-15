@@ -1,5 +1,6 @@
 import { startTransition } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
+import type { RouterCache } from '../client-core-utils/caches.js';
 import {
   getRouteUrl,
   isSameOrigin,
@@ -21,28 +22,44 @@ import {
 } from './frame.js';
 import type { Elements, RenderFrame, Scope, Shown } from './frame.js';
 import { handOff } from './handoff.js';
-import {
-  createNavigateListener,
-  reportUnlessAborted,
-} from './navigate-listener.js';
-import { abortError, ignoreRejection } from './promises.js';
-import { RequestInfo, fetched, toRequest } from './request.js';
-import type { Committed, Source } from './request.js';
-import { resolve } from './resolve.js';
+import { createNavigateListener, navigate } from './navigate-listener.js';
+import { abortError, ignoreRejection, isAbortError } from './promises.js';
+import { fetched, resolve } from './resolve.js';
+import type { Displayed, Source } from './resolve.js';
 import { dispatchChangeRoute } from './router-context.js';
 import type { ChangeRoute, ChangeRouteOptions } from './router-context.js';
+import type { Interceptor } from './traversal-guard.js';
+
+/** What the last commit showed. Decisions read this, never a render. */
+export type Committed = Displayed & {
+  readonly frame: RenderFrame;
+  readonly cache: RouterCache;
+  readonly interceptor: Interceptor;
+};
 
 const runNow = (update: () => void) => update();
+
+// A dropped update is expected. Anything else would otherwise disappear
+// without a trace.
+const reportUnlessAborted = (error: unknown) => {
+  if (!isAbortError(error)) {
+    console.error('Error while applying a route update:', error);
+  }
+};
 
 /**
  * The Navigation API binding. The browser owns the URL, history, scroll and
  * focus; this listens for navigations, resolves each one with `resolve()`,
  * and queues the frame that shows the result.
+ *
+ * `keepReloadTarget` is called when a navigation starts. During development
+ * it keeps Minimal from refetching the initial route on a reload; the router
+ * refetches the route it is showing instead.
  */
 export function createNavigation(
   setFrame: Dispatch<SetStateAction<RenderFrame>>,
   first: Committed,
-  onAttemptStart: () => void,
+  keepReloadTarget: () => void,
 ) {
   let current = first;
   const attempts = createAttempts();
@@ -67,21 +84,15 @@ export function createNavigation(
   };
 
   const start = (route: RouteProps): Attempt => {
-    onAttemptStart();
+    keepReloadTarget();
     return attempts.start(route);
   };
 
   // Queues the frame for an outcome. The promise settles when React has
   // committed that frame, or rejects when the attempt is dropped first.
-  const show = (
-    attempt: Attempt,
-    outcome: Shown,
-    // A transition keeps the current content until the new frame is ready.
-    // An instant preview is meant to replace it at once.
-    schedule: (update: () => void) => void = startTransition,
-  ): Promise<void> => {
+  const show = (attempt: Attempt, outcome: Shown): Promise<void> => {
     if (attempt.signal.aborted) {
-      throw abortError();
+      return Promise.reject(abortError());
     }
     const committed = Promise.withResolvers<void>();
     attempt.signal.addEventListener('abort', () =>
@@ -89,9 +100,11 @@ export function createNavigation(
     );
     ignoreRejection(committed.promise);
     if (outcome.kind !== 'failed') {
-      attempt.queued = outcome.route;
+      attempts.queue(attempt, outcome.route);
     }
-    update(schedule, (prev) =>
+    // A transition keeps the current content until the new frame is ready.
+    // An instant preview is meant to replace it at once.
+    update(outcome.kind === 'preview' ? runNow : startTransition, (prev) =>
       attempt.signal.aborted
         ? prev
         : nextFrame(prev, outcome, {
@@ -113,10 +126,15 @@ export function createNavigation(
   ) => {
     const attempt = start(route);
     attempts.own(attempt);
-    const url = options.url ?? new URL(window.location.href);
     try {
       const outcome = await resolve(
-        toRequest(route, url, options, source),
+        {
+          route,
+          url: options.url ?? new URL(window.location.href),
+          scroll: options.shouldScroll,
+          refetch: options.refetch,
+          source,
+        },
         current,
         current.cache,
         attempt.signal,
@@ -136,25 +154,8 @@ export function createNavigation(
     }
   };
 
-  // Asks the browser to navigate; the listener below takes it from there.
-  const navigate = (
-    route: RouteProps,
-    options: ChangeRouteOptions,
-    url: URL,
-    source: Source,
-  ) => {
-    const settle = Promise.withResolvers<void>();
-    const result = window.navigation.navigate(url.href, {
-      history: options.history === 'replace' ? 'replace' : 'auto',
-      info: new RequestInfo(route, options, source, settle),
-    });
-    // The router reports the outcome through `settle`.
-    ignoreRejection(result.committed);
-    ignoreRejection(result.finished);
-    return settle.promise;
-  };
-
-  const go = (
+  // Every route change the router itself starts goes through here.
+  const request = (
     route: RouteProps,
     options: ChangeRouteOptions,
     source: Source,
@@ -169,18 +170,16 @@ export function createNavigation(
     }
     return options.history === null
       ? applyInPlace(route, options, source)
-      : navigate(route, options, url, source);
+      : navigate(route, url, options.history, options, source);
   };
   const changeRoute: ChangeRoute = (route, options) =>
-    go(route, options, fetched);
+    request(route, options, fetched);
 
   const onNavigate = createNavigateListener({
     at: () => current,
     attempts,
     start,
     show,
-    navigate,
-    changeRoute,
   });
 
   // Fragment-only navigations are not intercepted, so record their hash.
@@ -200,7 +199,10 @@ export function createNavigation(
     commit(committed: Committed) {
       current = committed;
       const { frame } = committed;
-      attempts.committed(frame.scope.navigation, frame.kind !== 'preview');
+      if (frame.kind !== 'preview') {
+        // A preview is still waiting for the response that fills it in.
+        attempts.release(frame.scope.navigation);
+      }
       if (frame.kind !== 'failed') {
         committed.cache.learnStaticFromElements(committed.elements);
       }
@@ -252,7 +254,7 @@ export function createNavigation(
     // shown. It continues the navigation that page came from, so it counts
     // against the same limit of follows.
     followIntent: (route: RouteProps, url: URL, shouldScroll: boolean) =>
-      go(
+      request(
         route,
         { shouldScroll, history: 'replace', url },
         {
@@ -272,7 +274,8 @@ export function createNavigation(
         kind: 'response',
         response: Promise.resolve(response),
       };
-      const apply: ChangeRoute = (route, options) => go(route, options, source);
+      const apply: ChangeRoute = (route, options) =>
+        request(route, options, source);
       await dispatchChangeRoute(apply, sameRoute ? shown : next, {
         shouldScroll: false,
         history: sameRoute || is404 ? null : 'push',

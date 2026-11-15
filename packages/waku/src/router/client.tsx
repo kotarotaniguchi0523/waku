@@ -28,7 +28,7 @@ import {
 } from './client-core-utils/route-url.js';
 import type { ServerFunctionRouting } from './client-core-utils/server-function-routing.js';
 import { createServerFunctionRouting } from './client-core-utils/server-function-routing.js';
-import { errorOf, initialFrame } from './client-utils/frame.js';
+import { errorOf, initialFrame, withElements } from './client-utils/frame.js';
 import type { Elements, RenderFrame } from './client-utils/frame.js';
 import {
   MissingRouteHandler,
@@ -401,7 +401,7 @@ export function Router({
   );
   const [updateElements] = useState(
     () => (update: (prev: Promise<Elements>) => Promise<Elements>) =>
-      setFrame((prev) => ({ ...prev, elements: update(prev.elements) })),
+      setFrame((prev) => withElements(prev, update)),
   );
   return (
     <ControlledRoot

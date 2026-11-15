@@ -1,15 +1,18 @@
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
 
+/** The abort reason of a navigation that another one took the place of. */
+export const SUPERSEDED = Symbol('superseded');
+
 /** One navigation, from its start until its content is shown or dropped. */
 export type Attempt = {
   /** Also the `navigation` number of the frames it shows. */
   readonly id: number;
+  /** Aborts when the navigation is dropped; the reason says why. */
   readonly signal: AbortSignal;
-  readonly abort: () => void;
+  /** Drops the navigation. Without a reason it counts as superseded. */
+  readonly abort: (reason?: unknown) => void;
   /** The route asked for. */
   readonly target: RouteProps;
-  /** The route of the frame it has queued, once it has one. */
-  queued: RouteProps | undefined;
 };
 
 /**
@@ -23,7 +26,7 @@ export type Attempt = {
 export function createAttempts() {
   let nextId = 0;
   let loading: Attempt | undefined;
-  let owner: Attempt | undefined;
+  let owner: { attempt: Attempt; queued: RouteProps | undefined } | undefined;
 
   return {
     /** Starts a navigation that has not moved the URL yet. */
@@ -32,15 +35,14 @@ export function createAttempts() {
       const attempt: Attempt = {
         id: ++nextId,
         signal: controller.signal,
-        abort: () => controller.abort(),
+        abort: (reason = SUPERSEDED) => controller.abort(reason),
         target,
-        queued: undefined,
       };
       controller.signal.addEventListener('abort', () => {
         if (loading === attempt) {
           loading = undefined;
         }
-        if (owner === attempt) {
+        if (owner?.attempt === attempt) {
           owner = undefined;
         }
       });
@@ -57,22 +59,31 @@ export function createAttempts() {
           older.abort();
         }
       }
-      if (owner !== attempt) {
-        owner?.abort();
-      }
-      if (!attempt.signal.aborted) {
-        owner = attempt;
+      if (owner?.attempt !== attempt) {
+        owner?.attempt.abort();
+        owner = attempt.signal.aborted
+          ? undefined
+          : { attempt, queued: undefined };
       }
     },
-    /** React committed a frame of navigation `id`. */
-    committed(id: number, final: boolean) {
-      if (final && owner?.id === id) {
+    /** `attempt` has queued a frame that shows `route`. */
+    queue(attempt: Attempt, route: RouteProps) {
+      if (owner?.attempt === attempt) {
+        owner.queued = route;
+      }
+    },
+    /** Navigation `id` is fully shown; nothing can drop it any more. */
+    release(id: number) {
+      if (owner?.attempt.id === id) {
         owner = undefined;
       }
     },
     /** The navigation whose content has not reached the screen at all. */
     pending(shownNavigation: number): Attempt | undefined {
-      return loading ?? (owner?.id === shownNavigation ? undefined : owner);
+      return (
+        loading ??
+        (owner?.attempt.id === shownNavigation ? undefined : owner?.attempt)
+      );
     },
     /** Whether `attempt` is still waiting to move the URL. */
     isLoading(attempt: Attempt) {
@@ -88,7 +99,7 @@ export function createAttempts() {
     },
     dropAll() {
       loading?.abort();
-      owner?.abort();
+      owner?.attempt.abort();
     },
   };
 }

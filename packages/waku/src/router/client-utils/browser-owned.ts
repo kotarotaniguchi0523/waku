@@ -30,10 +30,14 @@ export function isLeftToBrowser(event: NavigateEvent, own: boolean): boolean {
     !!event.formData ||
     // The author asked for a document load, for example to sign out.
     isExternalLink(event.sourceElement) ||
-    // `history.pushState()` or `replaceState()` from other code: that code
-    // changed the URL for its own purposes and shows its own content.
     (!own &&
-      event.destination.sameDocument &&
-      (navigationType === 'push' || navigationType === 'replace'))
+      // `location.reload()`: the caller wants the document loaded again,
+      // for example because the client is out of date.
+      (navigationType === 'reload' ||
+        // `history.pushState()` or `replaceState()` from other code: that
+        // code changed the URL for its own purposes and shows its own
+        // content.
+        (event.destination.sameDocument &&
+          (navigationType === 'push' || navigationType === 'replace'))))
   );
 }

@@ -8,3 +8,9 @@ export const isAbortError = (error: unknown) =>
 export const ignoreRejection = (promise: Promise<unknown> | undefined) => {
   promise?.catch(() => {});
 };
+
+/** For a navigation whose outcome the router reports itself. */
+export const ignoreResult = (result: NavigationResult) => {
+  ignoreRejection(result.committed);
+  ignoreRejection(result.finished);
+};

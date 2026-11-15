@@ -13,17 +13,24 @@ import type { Elements, Outcome } from './frame.js';
 import { abortError } from './promises.js';
 import { resolveServerRedirect } from './server-redirect.js';
 
+/** Where the elements of a request come from. */
+export type Source =
+  /** The route is fetched; `follows` counts what led here already. */
+  | { readonly kind: 'fetch'; readonly follows: number }
+  /** A response already on its way, as from a server function. */
+  | { readonly kind: 'response'; readonly response: Promise<Elements> };
+
+/** A fetch that follows on nothing. */
+export const fetched: Source = { kind: 'fetch', follows: 0 };
+
 /** What a navigation asks for. */
 export type Request = {
   readonly route: RouteProps;
   readonly url: URL;
   readonly scroll: boolean;
-  /** Redirects and not-found pages already followed. */
-  readonly follows: number;
   /** `true` fetches, `false` does not, `undefined` fetches a changed route. */
   readonly refetch: boolean | undefined;
-  /** A response already on its way, used in place of a fetch. */
-  readonly adopt: Promise<Elements> | undefined;
+  readonly source: Source;
 };
 
 /** What is on screen when the navigation starts. */
@@ -44,7 +51,9 @@ export async function resolve(
   cache: Pick<RouterCache, 'load' | 'canReuseStaticRoute'>,
   signal: AbortSignal,
 ): Promise<Outcome> {
-  const { route, url, scroll, follows, adopt } = request;
+  const { route, url, scroll, source } = request;
+  const adopt = source.kind === 'response' ? source.response : undefined;
+  const follows = source.kind === 'fetch' ? source.follows : 0;
   const base = shown.elements;
   const sameRoute = isSameRscRoute(route, shown.route);
   const shouldRefetch = adopt !== undefined || (request.refetch ?? !sameRoute);
@@ -124,7 +133,7 @@ export async function resolve(
     patch,
     source:
       loaded.type === 'loaded'
-        ? { kind: 'response', route: loaded.route, base }
+        ? { kind: 'response', requested: loaded.route, base }
         : { kind: 'known' },
   };
 }

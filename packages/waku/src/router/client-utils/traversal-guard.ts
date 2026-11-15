@@ -1,11 +1,15 @@
 import { isSameRoute } from '../client-core-utils/route-url.js';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
-import { ignoreRejection } from './promises.js';
+import { ignoreResult } from './promises.js';
 
 /** Marks the traversal that returns to the shown entry after a refused one. */
 const RETURN = { wakuReturn: true } as const;
 
-const quiet = { scroll: 'manual', focusReset: 'manual' } as const;
+/** Intercepts without letting the browser scroll or move focus. */
+export const quiet = { scroll: 'manual', focusReset: 'manual' } as const;
+
+export type Interceptor =
+  ((route: RouteProps) => RouteProps | false) | undefined;
 
 /** The traversal that undoes a refused one changes nothing on screen. */
 export function acceptReturn(event: NavigateEvent): boolean {
@@ -24,7 +28,7 @@ export function acceptReturn(event: NavigateEvent): boolean {
 export function guardTraversal(
   event: NavigateEvent,
   requested: RouteProps,
-  decide: ((route: RouteProps) => RouteProps | false) | undefined,
+  decide: Interceptor,
   showInstead: (route: RouteProps) => void,
 ): boolean {
   if (event.navigationType !== 'traverse' || !decide) {
@@ -51,9 +55,7 @@ export function guardTraversal(
     handler: async () => {
       if (shown !== undefined) {
         setTimeout(() => {
-          const back = navigation.traverseTo(shown, { info: RETURN });
-          ignoreRejection(back.committed);
-          ignoreRejection(back.finished);
+          ignoreResult(navigation.traverseTo(shown, { info: RETURN }));
         });
       }
     },

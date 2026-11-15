@@ -6,6 +6,7 @@ import {
   nextFrame,
   originOf,
   routeOf,
+  withElements,
   withFragment,
   withRerender,
 } from '../src/router/client-utils/frame.js';
@@ -52,7 +53,7 @@ const response = (
   base: Elements,
 ): Outcome & { kind: 'render' } => ({
   ...known(path, patch),
-  source: { kind: 'response', route: route(path), base },
+  source: { kind: 'response', requested: route(path), base },
 });
 
 const preview = (
@@ -180,6 +181,20 @@ describe('nextFrame', () => {
     });
   });
 
+  test('the response still fills a preview whose fragment changed meanwhile', async () => {
+    const slot = getRouteSlotId('/a');
+    const shown = nextFrame(start(), preview('/a', { [slot]: 'shell' }), at(1));
+    const moved = withFragment(
+      shown,
+      { route: home, url: urlOf('/') },
+      urlOf('/a#x'),
+    );
+    const filled = nextFrame(moved, known('/a', { [slot]: 'late' }), at(1));
+    expect(filled.kind).toBe('ready');
+    expect(await filled.elements).toMatchObject({ [slot]: 'shell' });
+    expect(filled.scope.fragment).toBe(moved.scope.fragment);
+  });
+
   test('a result of another navigation replaces what a preview showed', async () => {
     const slot = getRouteSlotId('/a');
     const shown = nextFrame(start(), preview('/a', { [slot]: 'shell' }), at(1));
@@ -254,5 +269,17 @@ describe('withRerender', () => {
   test('a failed frame is left alone', () => {
     const broken = nextFrame(start(), failed('/a', new Error('no')), at(1));
     expect(withRerender(broken, home, home, rerender)).toBe(broken);
+  });
+});
+
+describe('withElements', () => {
+  test('replaces the elements and keeps the route and scope', async () => {
+    const shown = nextFrame(start(), known('/a'), at(1));
+    const frame = withElements(shown, (elements) =>
+      elements.then((current) => ({ ...current, extra: 1 })),
+    );
+    expect(routeOf(frame, home)).toEqual(route('/a'));
+    expect(frame.scope).toBe(shown.scope);
+    expect(await frame.elements).toMatchObject({ extra: 1 });
   });
 });

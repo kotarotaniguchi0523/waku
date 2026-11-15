@@ -2,9 +2,10 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { FetchRsc } from '../src/router/client-core-utils/caches.js';
 import { getRouterCacheForTest } from '../src/router/client-core-utils/caches.js';
-import { resolve } from '../src/router/client-utils/resolve.js';
+import { fetched, resolve } from '../src/router/client-utils/resolve.js';
 import type { Request } from '../src/router/client-utils/resolve.js';
 import {
+  INTENT_ID,
   IS_STATIC_ID,
   ROUTE_ID,
   encodeRoutePath,
@@ -42,9 +43,8 @@ const request = (path: string, more: Partial<Request> = {}): Request => ({
   route: route(path),
   url: urlOf(path),
   scroll: true,
-  follows: 0,
   refetch: undefined,
-  adopt: undefined,
+  source: fetched,
   ...more,
 });
 
@@ -125,13 +125,41 @@ describe('resolve', () => {
   test('a response already on its way is used in place of a fetch', async () => {
     const { cache, fetchRsc } = serve({});
     const outcome = await resolve(
-      request('/a', { adopt: Promise.resolve(page('/a')) }),
+      request('/a', {
+        source: { kind: 'response', response: Promise.resolve(page('/a')) },
+      }),
       shown('/'),
       cache,
       live(),
     );
     expect(fetchRsc).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ kind: 'render', route: route('/a') });
+  });
+
+  test('the follows already made are carried into the result', async () => {
+    const { cache } = serve({ '/a': page('/a') });
+    const outcome = await resolve(
+      request('/a', { source: { kind: 'fetch', follows: 2 } }),
+      shown('/'),
+      cache,
+      live(),
+    );
+    expect(outcome).toMatchObject({ kind: 'render', origin: { follows: 2 } });
+  });
+
+  test('a redirect to another origin becomes a leave outcome', async () => {
+    const { cache } = serve({
+      '/out': page('/out', {
+        [INTENT_ID]: Promise.resolve(
+          JSON.stringify({ location: 'https://other.example/x', status: 307 }),
+        ),
+      }),
+    });
+    const outcome = await resolve(request('/out'), shown('/'), cache, live());
+    expect(outcome.kind).toBe('leave');
+    expect(outcome.kind === 'leave' && outcome.location.href).toBe(
+      'https://other.example/x',
+    );
   });
 
   test('a failed request becomes a failed outcome for the requested route', async () => {
