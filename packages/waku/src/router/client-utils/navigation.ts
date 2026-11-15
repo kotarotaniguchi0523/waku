@@ -183,7 +183,9 @@ export function useNavigation(
   const refreshOwedRef = useRef(false);
   const refreshAbandonedRef = useRef<() => void>(undefined);
   const nextIdRef = useRef(0);
-  const commitWaitersRef = useRef(new Map<number, () => void>());
+  // A navigation can queue more than one frame (an instant preview and its
+  // fill), so each id holds every waiter still open.
+  const commitWaitersRef = useRef(new Map<number, Set<() => void>>());
   const { commitId, error } = frame;
   useLayoutEffect(() => {
     committedRef.current = { elements, route, state: frame.state };
@@ -198,7 +200,9 @@ export function useNavigation(
       cache.learnStaticFromElements(elements);
     }
     // Lets the browser finish the navigation this frame belongs to.
-    commitWaitersRef.current.get(commitId)?.();
+    for (const resolve of commitWaitersRef.current.get(commitId) ?? []) {
+      resolve();
+    }
     commitWaitersRef.current.delete(commitId);
   }, [cache, elements, route, frame.state, commitId, error, stateByElements]);
 
@@ -475,7 +479,9 @@ export function useNavigation(
         throw abortError();
       }
       const committed = new Promise<void>((resolve, reject) => {
-        commitWaitersRef.current.set(attempt.id, resolve);
+        const waiters = commitWaitersRef.current.get(attempt.id) ?? new Set();
+        waiters.add(resolve);
+        commitWaitersRef.current.set(attempt.id, waiters);
         attempt.signal.addEventListener('abort', () => {
           commitWaitersRef.current.delete(attempt.id);
           reject(abortError());
