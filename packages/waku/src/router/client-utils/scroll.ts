@@ -65,6 +65,54 @@ export function scrollToHash(
   });
 }
 
+const LATE_HASH_TIMEOUT = 2000;
+
+/**
+ * The browser scrolls to a fragment when the navigation finishes. A target
+ * that renders later, such as one inside `<Suspense>`, is scrolled to once it
+ * appears. The wait ends after a timeout, when another navigation starts, or
+ * when the page is scrolled away from where the navigation left it.
+ */
+export function scrollToHashWhenRendered(hash: string) {
+  if (!hash || getHashElement(hash)) {
+    return;
+  }
+  const { navigation } = window;
+  const left = window.scrollX;
+  const top = window.scrollY;
+  const observer = new MutationObserver(() => {
+    if (getHashElement(hash)) {
+      stop();
+      scrollToHash(hash, 'auto', false);
+    }
+  });
+  const onScroll = () => {
+    if (window.scrollX !== left || window.scrollY !== top) {
+      stop();
+    }
+  };
+  const onNavigate = (event: NavigateEvent) => {
+    // React's transition indicator does not move anywhere.
+    if (event.info !== 'react-transition') {
+      stop();
+    }
+  };
+  const timer = setTimeout(stop, LATE_HASH_TIMEOUT);
+  observer.observe(document, {
+    subtree: true,
+    childList: true,
+    attributeFilter: ['id', 'name'],
+  });
+  window.addEventListener('scroll', onScroll, { passive: true });
+  navigation.addEventListener('navigate', onNavigate);
+  function stop() {
+    clearTimeout(timer);
+    observer.disconnect();
+    window.removeEventListener('scroll', onScroll);
+    navigation.removeEventListener('navigate', onNavigate);
+  }
+}
+
 export function shouldScrollByDefault(url: URL) {
   return (
     pathnameToCurrentRoutePath(url.pathname) !==

@@ -16,6 +16,14 @@ type ServerFunctionRoutingCallbacks = {
   applyRouteResponse: (
     elements: Readonly<Record<string | symbol, unknown>>,
   ) => void | Promise<void>;
+  /**
+   * Called with a rerender of the displayed route that is not applied
+   * because a navigation is loading. A binding can keep it, so the update
+   * is not lost if that navigation never arrives.
+   */
+  onOriginRerenderDropped?: (
+    elements: Readonly<Record<string | symbol, unknown>>,
+  ) => void;
 };
 
 /**
@@ -90,7 +98,15 @@ export function createServerFunctionRouting(): ServerFunctionRouting {
       if (IS_ORIGIN_ID in responseElements) {
         const pendingRoute = getPendingRoute();
         // React holds a navigation back until a pending action settles
-        if (pendingRoute || !isSameRscRoute(getSettledRoute(), origin)) {
+        const originShown = isSameRscRoute(getSettledRoute(), origin);
+        if (pendingRoute || !originShown) {
+          if (originShown) {
+            connection.onOriginRerenderDropped?.(
+              combineElements({}, responseElements, {
+                filter: (key) => key !== IS_ORIGIN_ID,
+              }),
+            );
+          }
           return { ...response, elements: {} };
         }
         responseElements = combineElements({}, responseElements, {
@@ -128,6 +144,7 @@ export function useServerFunctionRouting(
     getSettledRoute,
     getPendingRoute,
     applyRouteResponse,
+    onOriginRerenderDropped,
   }: ServerFunctionRoutingCallbacks,
 ): void {
   const cache = useRouterCache();
@@ -138,6 +155,7 @@ export function useServerFunctionRouting(
         getSettledRoute,
         getPendingRoute,
         applyRouteResponse,
+        ...(onOriginRerenderDropped ? { onOriginRerenderDropped } : {}),
       }),
     [
       serverFunctionRouting,
@@ -145,6 +163,7 @@ export function useServerFunctionRouting(
       getSettledRoute,
       getPendingRoute,
       applyRouteResponse,
+      onOriginRerenderDropped,
     ],
   );
 }

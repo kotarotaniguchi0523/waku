@@ -99,14 +99,14 @@ describe('waku/router/client-core surface', () => {
     expect(names.has('unstable_changeRoute')).toBe(false);
   });
 
-  test('client-core.ts does not import the history binding or router-state', () => {
+  test('client-core.ts does not import the browser binding', () => {
     const src = readFileSync(join(routerSrc, 'client-core.ts'), 'utf8');
     const specs = [...src.matchAll(/from ['"]([^'"]+)['"]/g)].map(
       (match) => match[1]!,
     );
     expect(specs.length).toBeGreaterThan(0);
     for (const spec of specs) {
-      expect(spec).not.toMatch(/client\.tsx|router-state/);
+      expect(spec).not.toMatch(/client\.tsx|client-utils\//);
     }
   });
 

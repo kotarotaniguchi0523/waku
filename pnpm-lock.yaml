@@ -497,6 +497,31 @@ importers:
         specifier: latest
         version: link:../../../packages/waku
 
+  e2e/fixtures/navigation-contract:
+    dependencies:
+      react:
+        specifier: ~19.3.1
+        version: 19.3.1
+      react-dom:
+        specifier: ~19.3.1
+        version: 19.3.1(react@19.3.1)
+      react-server-dom-webpack:
+        specifier: ~19.3.1
+        version: 19.3.1(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(webpack@5.99.9)
+      waku:
+        specifier: latest
+        version: link:../../../packages/waku
+    devDependencies:
+      '@types/react':
+        specifier: ^19.3.0
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: ^19.3.0
+        version: 19.3.0(@types/react@19.3.0)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
   e2e/fixtures/partial-build:
     dependencies:
       react:

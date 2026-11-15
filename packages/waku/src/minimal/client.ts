@@ -4,6 +4,8 @@ export type { RscEnhancer as Unstable_RscEnhancer } from './client-utils/root-st
 
 export {
   Root as Root_UNSTABLE,
+  ControlledRoot as ControlledRoot_UNSTABLE,
+  useInitialElements as useInitialElements_UNSTABLE,
   Slot as Slot_UNSTABLE,
   Children as Children_UNSTABLE,
   useFetchRsc as useFetchRsc_UNSTABLE,

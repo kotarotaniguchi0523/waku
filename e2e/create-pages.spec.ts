@@ -463,16 +463,16 @@ test.describe(`create-pages`, () => {
     await expect(
       page.getByRole('heading', { name: 'Long Suspense Page 1' }),
     ).toBeVisible();
+    // The address bar moves as soon as the destination responds, so only the
+    // content is checked while the page is pending.
     const pendingSeen = waitForSelectorSeen(page, PENDING_SELECTOR);
     await clickClientLink(page, '/long-suspense/2');
     await page.waitForFunction(
       ([pendingSel, sel]) => {
-        const pathname = window.location.pathname;
         const pendingElement = document.querySelector(pendingSel);
         const heading = document.querySelector(sel);
         return (
           pendingElement?.textContent === 'Pending...' &&
-          pathname === '/long-suspense/1' &&
           heading?.textContent === 'Long Suspense Page 1'
         );
       },
@@ -485,12 +485,10 @@ test.describe(`create-pages`, () => {
     await clickClientLink(page, '/long-suspense/3');
     await page.waitForFunction(
       ([pendingSel, sel]) => {
-        const pathname = window.location.pathname;
         const pendingElement = document.querySelector(pendingSel);
         const heading = document.querySelector(sel);
         return (
           pendingElement?.textContent === 'Pending...' &&
-          pathname === '/long-suspense/2' &&
           heading?.textContent === 'Long Suspense Page 2'
         );
       },
@@ -503,12 +501,10 @@ test.describe(`create-pages`, () => {
     await clickClientLink(page, '/long-suspense/2');
     await page.waitForFunction(
       ([pendingSel, sel]) => {
-        const pathname = window.location.pathname;
         const pendingElement = document.querySelector(pendingSel);
         const heading = document.querySelector(sel);
         return (
           pendingElement?.textContent === 'Pending...' &&
-          pathname === '/long-suspense/3' &&
           heading?.textContent === 'Long Suspense Page 3'
         );
       },

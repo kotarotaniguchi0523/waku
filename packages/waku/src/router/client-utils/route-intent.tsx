@@ -19,21 +19,35 @@ import {
   INTENT_ID,
   getRouteFromElements,
 } from '../isomorphic-utils/router-protocol.js';
+import type { Scope } from './frame.js';
 import { RouterContext } from './router-context.js';
-import { getRouterState } from './router-state.js';
 
-type Elements = Readonly<Record<string | symbol, unknown>>;
+type PendingIntent = PromiseLike<string | undefined>;
 
+/**
+ * Follows redirect and not-found intents that settle after their content is
+ * on screen.
+ *
+ * An intent is acted on only while the place it came from is still current,
+ * and never while another navigation is loading:
+ * - The intent of the displayed route itself belongs to that route. It stays
+ *   current across fragment changes, since those keep the user on the route,
+ *   and ends when another navigation is shown.
+ * - An intent from a partial response (a slice, or a server function that
+ *   returned no route) belongs to the moment it was requested. Any later
+ *   navigation, a fragment change included, makes it stale.
+ */
 export function RouteIntent({
   onError,
 }: {
-  onError: (error: unknown, source: Elements) => void;
+  onError: (error: unknown) => void;
 }) {
   const elements = use(useElementsPromise());
   const router = use(RouterContext);
   const cache = useRouterCache();
   const getElements = router?.getElements;
-  const handledIntents = useRef(new WeakSet<PromiseLike<string | undefined>>());
+  const getScope = router?.getScope;
+  const handledIntents = useRef(new WeakSet<PendingIntent>());
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -44,30 +58,38 @@ export function RouteIntent({
   const settle = useEffectEvent(
     (
       outcome: RouteIntentOutcome,
-      source: Elements,
-      pending: PromiseLike<string | undefined>,
+      pending: PendingIntent,
+      scope: Scope | undefined,
+      partial: boolean,
     ) => {
-      if (!router?.isCurrentRoute?.(source)) {
+      if (!router || !getElements) {
+        return;
+      }
+      if (scope && !router.isCurrentScope?.(scope, partial)) {
+        return;
+      }
+      const source = getElements();
+      if (!partial && source[INTENT_ID] !== pending) {
         return;
       }
       if (handledIntents.current.has(pending)) {
         return;
       }
       handledIntents.current.add(pending);
-      const state = getRouterState(source);
+      const origin = router.getOrigin?.();
       try {
         const sourceRoute = getRouteFromElements(source);
         const requestedUrl = new URL(
-          state?.url ?? window.location.href,
+          origin?.url ?? window.location.href,
           window.location.href,
         );
-        const requested = state?.requested;
+        const requested = origin?.requested;
         const attempt = {
           route: requested
             ? { path: requested[0], query: requested[1] }
             : (sourceRoute ?? parseRoute(requestedUrl)),
           url: requestedUrl,
-          follows: state?.follows ?? 0,
+          follows: origin?.follows ?? 0,
         };
         const decision = getRouteIntentDecision(outcome, source, attempt);
         if (!decision) {
@@ -80,42 +102,41 @@ export function RouteIntent({
         const { target, url } = decision;
         startTransition(() => {
           router
-            .changeRoute(target, {
-              shouldScroll: state
-                ? state.scroll !== null
-                : target.path !== sourceRoute?.path,
-              history: 'replace',
+            .followIntent?.(
+              target,
               url,
-              follows: (state?.follows ?? 0) + 1,
-            })
-            .catch((error: unknown) => onError(error, source));
+              origin ? origin.scroll : target.path !== sourceRoute?.path,
+            )
+            .catch(onError);
         });
       } catch (error) {
-        onError(error, source);
+        onError(error);
       }
     },
   );
 
+  // The displayed route's own intent.
   useEffect(() => {
-    const pending = elements[INTENT_ID] as
-      PromiseLike<string | undefined> | null | undefined;
+    const pending = elements[INTENT_ID] as PendingIntent | null | undefined;
     if (!pending) {
       return;
     }
+    const scope = getScope?.();
     return observeRouteIntent(pending, (outcome) => {
-      settle(outcome, elements, pending);
+      settle(outcome, pending, scope, false);
     });
-  }, [elements]);
+  }, [elements, getScope]);
 
+  // Intents of partial responses, captured when their request starts.
   useLayoutEffect(() => {
     if (!getElements) {
       return;
     }
     const unregister = cache.connectRouteIntentObserver((signal) => {
-      const scope = getRouterState(getElements());
+      const scope = getScope?.();
       return (responseElements) => {
         const pending = responseElements[INTENT_ID] as
-          PromiseLike<string | undefined> | null | undefined;
+          PendingIntent | null | undefined;
         if (!pending) {
           return responseElements;
         }
@@ -123,12 +144,8 @@ export function RouteIntent({
           return responseElements;
         }
         observeRouteIntent(pending, (outcome) => {
-          if (
-            mounted.current &&
-            !signal?.aborted &&
-            getRouterState(getElements()) === scope
-          ) {
-            settle(outcome, getElements(), pending);
+          if (mounted.current && !signal?.aborted) {
+            settle(outcome, pending, scope, true);
           }
         });
         return combineElements({}, responseElements, {
@@ -139,7 +156,7 @@ export function RouteIntent({
     return () => {
       unregister();
     };
-  }, [cache, getElements]);
+  }, [cache, getElements, getScope]);
 
   return null;
 }

@@ -763,6 +763,8 @@ This allows you to have a `dynamic` slice component while keeping the rest of th
 
 ## Navigation
 
+The router is built on the browser's [Navigation API](https://developer.mozilla.org/docs/Web/API/Navigation_API), including `precommitHandler`. Browsers without it are not supported. Same-origin `<a>` elements navigate on the client too; add `rel="external"` to one that should load a document instead.
+
 ### Link
 
 The `<Link />` component should be used for internal links. It accepts a `to` prop for the destination and handles client-side navigation through Waku's router.

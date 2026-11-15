@@ -13,6 +13,7 @@ export const UBUNTU_LTS_ONLY_SPECS = [
   'instant-nav.spec.ts',
   'minimal-examples.spec.ts',
   'multi-platform.prd.spec.ts',
+  'navigation-contract.spec.ts',
   'partial-build.prd.spec.ts',
   'performance-track.dev.spec.ts',
   'react-compiler.spec.ts',

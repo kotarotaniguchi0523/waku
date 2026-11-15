@@ -371,6 +371,28 @@ export function useRegisterRscReloadListener() {
   );
 }
 
+type InitialElements = {
+  readonly input: readonly [rscPath: string, rscParams: unknown];
+  readonly elements: Promise<Elements>;
+};
+
+/**
+ * Resolves a mount's initial elements once: the streamed payload when there is
+ * one, otherwise a bootstrap fetch through `rscEnhancers`. Pass the result to
+ * `ControlledRoot` and use its `elements` to seed the state that owns them.
+ */
+export function useInitialElements(
+  initialRscPath?: string,
+  initialRscParams?: unknown,
+  rscEnhancers: readonly RscEnhancer[] = EMPTY_RSC_ENHANCERS,
+): InitialElements {
+  const [initial] = useState((): InitialElements => {
+    const input = [initialRscPath || '', initialRscParams] as const;
+    return { input, elements: getInitialRsc(...input, rscEnhancers) };
+  });
+  return initial;
+}
+
 /**
  * Client root. Seeds the initial elements, bridges the store to React state,
  * and provides the elements to `Slot` descendants.
@@ -392,18 +414,56 @@ export function Root({
   rscEnhancers?: readonly RscEnhancer[];
   children: ReactNode;
 }) {
-  const [initialInput] = useState(
-    () => [initialRscPath || '', initialRscParams] as const,
+  const initial = useInitialElements(
+    initialRscPath,
+    initialRscParams,
+    rscEnhancers,
   );
-  const [initialElements] = useState(() =>
-    getInitialRsc(...initialInput, rscEnhancers),
+  const [elements, setElements] = useState(initial.elements);
+  return (
+    <ControlledRoot
+      initial={initial}
+      elements={elements}
+      updateElements={setElements}
+      rscEnhancers={rscEnhancers}
+    >
+      {children}
+    </ControlledRoot>
   );
-  const [elements, setElements] = useState(initialElements);
+}
+
+/**
+ * A Root whose element state lives in its parent. The parent holds the
+ * elements promise in React state of its own, seeded from `initial.elements`,
+ * and applies every update the Root hands to `updateElements`. That lets the
+ * parent change the elements and other state it keeps beside them in one
+ * state update, so both commit together.
+ *
+ * `updateElements` must be stable for the lifetime of the mount and must apply
+ * `update` inside a React state updater; `update` is pure and may be replayed.
+ */
+export function ControlledRoot({
+  initial,
+  elements,
+  updateElements,
+  rscEnhancers = EMPTY_RSC_ENHANCERS,
+  children,
+}: {
+  initial: InitialElements;
+  elements: Promise<Elements>;
+  updateElements: (
+    update: (prev: Promise<Elements>) => Promise<Elements>,
+  ) => void;
+  /** See `Root`. */
+  rscEnhancers?: readonly RscEnhancer[];
+  children: ReactNode;
+}) {
+  const { input: initialInput, elements: initialElements } = initial;
   const [store] = useState(() => {
     const store: RootStore = {
       setElements: (update) => {
         const results = new WeakMap<Promise<Elements>, Promise<Elements>>();
-        setElements((prev) => {
+        updateElements((prev) => {
           let next = results.get(prev);
           if (!next) {
             next = update(prev);

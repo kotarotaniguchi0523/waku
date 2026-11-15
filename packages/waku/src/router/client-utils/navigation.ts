@@ -1,602 +1,303 @@
-import {
-  startTransition,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
-import {
-  unstable_combineElements as combineElements,
-  unstable_isBuildIdMismatch as isBuildIdMismatch,
-  useMergeElements_UNSTABLE as useMergeElements,
-  useRegisterRscReloadListener_UNSTABLE as useRegisterRscReloadListener,
-} from 'waku/minimal/client';
-import { useRouterCache } from '../client-core-utils/caches.js';
-import { useHmrRefetch } from '../client-core-utils/hmr.js';
-import { useInitialRoute } from '../client-core-utils/initial-route.js';
+import { startTransition } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
+import type { RouterCache } from '../client-core-utils/caches.js';
 import {
   getRouteUrl,
   isSameOrigin,
-  isSameRoute,
-  isSameRscRoute,
   otherOriginError,
-  parseRoute,
 } from '../client-core-utils/route-url.js';
-import type { ServerFunctionRouting } from '../client-core-utils/server-function-routing.js';
-import { useServerFunctionRouting } from '../client-core-utils/server-function-routing.js';
 import type { RouteProps } from '../isomorphic-utils/route-path.js';
 import {
-  INTENT_ID,
-  IS_STATIC_ID,
-  ROUTE_ID,
   getRouteFromElements,
-  getRouteSlotId,
-  has404FromElements,
-  isMetaKey,
   isStaticFromElements,
 } from '../isomorphic-utils/router-protocol.js';
+import { SUPERSEDED, createAttempts } from './attempts.js';
+import type { Attempt } from './attempts.js';
 import {
-  canPaintInstantOverlay,
-  useStartInstantPaint,
-} from './instant-navigation.js';
+  failedHere,
+  nextFrame,
+  originOfFrame,
+  withFragment,
+  withRerender,
+} from './frame.js';
+import type { Elements, RenderFrame, Scope, Shown } from './frame.js';
+import { handOff } from './handoff.js';
+import { createNavigateListener, navigate } from './navigate-listener.js';
+import { abortError, ignoreRejection, isAbortError } from './promises.js';
+import { fetched, resolve } from './resolve.js';
+import type { Displayed, Source } from './resolve.js';
 import { dispatchChangeRoute } from './router-context.js';
 import type { ChangeRoute, ChangeRouteOptions } from './router-context.js';
-import {
-  ROUTER_STATE_ID,
-  createRouterState,
-  getInstantSlotIds,
-  getRouterState,
-  resolveServerRedirect,
-  getSettledRoute as resolveSettledRoute,
-} from './router-state.js';
-import type { RouterState } from './router-state.js';
-import { scrollToHash, shouldScrollForRouteChange } from './scroll.js';
+import type { Interceptor } from './traversal-guard.js';
 
-type Elements = Readonly<Record<string | symbol, unknown>>;
-
-type HistoryIntent = ChangeRouteOptions['history'];
-
-type NavigationAttempt = {
-  route: RouteProps;
-  url: URL;
-  follows: number;
+/** What the last commit showed. Decisions read this, never a render. */
+export type Committed = Displayed & {
+  readonly frame: RenderFrame;
+  readonly cache: RouterCache;
+  readonly interceptor: Interceptor;
 };
 
-type NavigationError = { error: unknown };
+const runNow = (update: () => void) => update();
 
-type NavigationRequest = {
-  controller: AbortController;
-  target: Pick<RouteProps, 'path' | 'query'>;
-  base: Elements;
-  queuedState?: RouterState;
-};
+/** Abort reasons of navigations that no other navigation took the place of. */
+const UNMOUNTED = Symbol('unmounted');
+const OUTDATED = Symbol('outdated');
 
-type Navigation = {
-  route: RouteProps;
-  changeRoute: ChangeRoute;
-  getElements: () => Elements;
-  isCurrentRoute: (source: Elements) => boolean;
-  error: NavigationError | undefined;
-};
-
-const commitHistory = (url: URL, mode: HistoryIntent): void => {
-  if (window.location.href === url.href) {
-    return;
+// A dropped update is expected. Anything else would otherwise disappear
+// without a trace.
+const reportUnlessAborted = (error: unknown) => {
+  if (!isAbortError(error)) {
+    console.error('Error while applying a route update:', error);
   }
-  if (mode === 'push') {
-    window.history.pushState(window.history.state, '', url);
-    return;
-  }
-  window.history.replaceState(window.history.state, '', url);
 };
 
-const reloadWithUrl = (url: URL) => {
-  window.history.pushState(window.history.state, '', url);
-  window.location.reload();
-};
+/**
+ * The Navigation API binding. The browser owns the URL, history, scroll and
+ * focus; this listens for navigations, resolves each one with `resolve()`,
+ * and queues the frame that shows the result.
+ *
+ * `keepReloadTarget` is called when a navigation starts. During development
+ * it keeps Minimal from refetching the initial route on a reload; the router
+ * refetches the route it is showing instead.
+ */
+export function createNavigation(
+  setFrame: Dispatch<SetStateAction<RenderFrame>>,
+  first: Committed,
+  keepReloadTarget: () => void,
+) {
+  let current = first;
+  const attempts = createAttempts();
 
-export function useNavigation(
-  elements: Elements,
-  fallbackRoute: RouteProps,
-  routeInterceptor: ((route: RouteProps) => RouteProps | false) | undefined,
-  serverFunctionRouting: ServerFunctionRouting,
-): Navigation {
-  const cache = useRouterCache();
-  const initialRoute = useInitialRoute(fallbackRoute);
-  const has404 = has404FromElements(elements);
-  const initialElementsRef = useRef(elements);
-  useEffect(() => {
-    cache.learnStaticFromElements(initialElementsRef.current);
-  }, [cache]);
+  // React can run an updater more than once for the same previous frame;
+  // each run must return the same frame, and with it the same promise.
+  const update = (
+    schedule: (update: () => void) => void,
+    compute: (prev: RenderFrame) => RenderFrame,
+  ) => {
+    const results = new WeakMap<RenderFrame, RenderFrame>();
+    schedule(() => {
+      setFrame((prev) => {
+        let next = results.get(prev);
+        if (!next) {
+          next = compute(prev);
+          results.set(prev, next);
+        }
+        return next;
+      });
+    });
+  };
 
-  const committedElementsRef = useRef(elements);
-  useLayoutEffect(() => {
-    committedElementsRef.current = elements;
-  }, [elements]);
-  const getElements = useCallback(() => committedElementsRef.current, []);
+  const start = (route: RouteProps): Attempt => {
+    keepReloadTarget();
+    return attempts.start(route);
+  };
 
-  const startInstantPaint = useStartInstantPaint(getElements);
-  const mergeElements = useMergeElements();
-  const registerRscReloadListener = useRegisterRscReloadListener();
-  const [navigationError, setNavigationError] = useState<NavigationError>();
-  useEffect(() => {
-    if (import.meta.hot) {
-      // Router owns the HMR target; replace Minimal's initial-path listener.
-      registerRscReloadListener(() => {}, { replace: true });
+  // Queues the frame for an outcome. The promise settles when React has
+  // committed that frame, or rejects when the attempt is dropped first.
+  const show = (attempt: Attempt, outcome: Shown): Promise<void> => {
+    if (attempt.signal.aborted) {
+      return Promise.reject(abortError());
     }
-  }, [registerRscReloadListener]);
+    const committed = Promise.withResolvers<void>();
+    attempt.signal.addEventListener('abort', () =>
+      committed.reject(abortError()),
+    );
+    ignoreRejection(committed.promise);
+    if (outcome.kind !== 'failed') {
+      attempts.queue(attempt, outcome.route);
+    }
+    // A transition keeps the current content until the new frame is ready.
+    // An instant preview is meant to replace it at once.
+    update(outcome.kind === 'preview' ? runNow : startTransition, (prev) =>
+      attempt.signal.aborted
+        ? prev
+        : nextFrame(prev, outcome, {
+            navigation: attempt.id,
+            settled: current.route,
+            entryUrl: window.navigation.currentEntry?.url ?? undefined,
+            committed: () => committed.resolve(),
+          }),
+    );
+    return committed.promise;
+  };
 
-  const routerState = getRouterState(elements);
-  const routeData = elements[ROUTE_ID];
-  const isStatic = isStaticFromElements(elements);
-  const destination = useMemo(
-    () =>
-      routerState &&
-      resolveServerRedirect(
-        { [ROUTE_ID]: routeData, [IS_STATIC_ID]: isStatic },
-        routerState,
-        initialRoute.path,
-      ),
-    [routeData, isStatic, routerState, initialRoute.path],
-  );
-  const route = destination ? destination.route : initialRoute;
-  const requestRef = useRef<NavigationRequest>(undefined);
-  const appliedRef = useRef<{ state: RouterState; href: string }>(undefined);
-  const destinationHref = destination?.url.href;
-  const currentHash = route.hash;
-  useLayoutEffect(() => {
-    if (
-      routerState &&
-      requestRef.current?.queuedState === routerState &&
-      !getInstantSlotIds(elements)
-    ) {
-      if (!routerState.failedFrom) {
-        cache.learnStaticFromElements(elements);
-      }
-      requestRef.current = undefined;
-    }
-    if (!routerState || !destinationHref) {
-      return;
-    }
-    const originalState = routerState.originalState ?? routerState;
-    const applied = appliedRef.current?.state === originalState;
-    if (!applied || appliedRef.current?.href !== destinationHref) {
-      commitHistory(
-        new URL(destinationHref),
-        applied ? 'replace' : routerState.history,
+  // An update that moves nothing in the browser: the same location with new
+  // content, as after a server function rerenders the route.
+  const applyInPlace = async (
+    route: RouteProps,
+    options: ChangeRouteOptions,
+    source: Source,
+  ) => {
+    const attempt = start(route);
+    attempts.own(attempt);
+    try {
+      const outcome = await resolve(
+        {
+          route,
+          url: options.url ?? new URL(window.location.href),
+          scroll: options.shouldScroll,
+          refetch: options.refetch,
+          source,
+        },
+        current,
+        current.cache,
+        attempt.signal,
       );
-    }
-    appliedRef.current = { state: originalState, href: destinationHref };
-    if (applied || !routerState.scroll) {
-      return;
-    }
-    const { pathChanged } = routerState.scroll;
-    scrollToHash(currentHash, pathChanged ? 'instant' : 'auto', pathChanged);
-  }, [cache, elements, routerState, destinationHref, currentHash]);
-
-  const replaceRequest = useCallback((next?: NavigationRequest) => {
-    const superseded = requestRef.current;
-    requestRef.current = next;
-    if (superseded && !superseded.queuedState) {
-      superseded.controller.abort();
-    }
-  }, []);
-
-  const getSettledRoute = useCallback(
-    () => resolveSettledRoute(getElements(), initialRoute),
-    [getElements, initialRoute],
-  );
-  const getRefetchRoute = useCallback(() => {
-    const request = requestRef.current;
-    return request?.queuedState && !request.queuedState.failedFrom
-      ? resolveSettledRoute(request.base, initialRoute)
-      : getSettledRoute();
-  }, [getSettledRoute, initialRoute]);
-  useHmrRefetch({
-    getSettledRoute: getRefetchRoute,
-    onBeforeRefetch: replaceRequest,
-  });
-
-  const changeRoute: ChangeRoute = useCallback(
-    async function changeRoute(nextRoute, options) {
-      if (options.url && !isSameOrigin(options.url)) {
-        const error = otherOriginError(options.url);
-        setNavigationError({ error });
-        throw error;
+      if (outcome.kind === 'leave' || outcome.kind === 'reload') {
+        handOff(outcome, false);
+        return;
       }
-      const elements = getElements();
-      const settledRoute =
-        getRouterState(elements)?.failedFrom ??
-        resolveSettledRoute(elements, initialRoute);
-      const retainedElements = requestRef.current?.base;
-      const base = retainedElements ?? elements;
-      let responseFallback: Elements | undefined;
-      const mergeWithCachedRoute = (
-        prevPromise: Promise<Elements>,
-        patchPromise: Promise<Elements>,
-      ) =>
-        Promise.all([prevPromise, patchPromise]).then(([prev, patch]) => {
-          const route = getRouteFromElements(patch);
-          const slotId = route && getRouteSlotId(route.path);
-          const represented = getInstantSlotIds(prev);
-          let available =
-            responseFallback && represented
-              ? combineElements(prev, responseFallback, {
-                  filter: (key) =>
-                    typeof key === 'string' &&
-                    !represented.has(key) &&
-                    !Object.hasOwn(prev, key),
-                })
-              : prev;
-          const cachedElements =
-            slotId && responseFallback && slotId in responseFallback
-              ? responseFallback
-              : base;
-          if (slotId && !(slotId in available) && slotId in cachedElements) {
-            available = combineElements(available, cachedElements, {
-              filter: (key) => key === slotId,
-            });
-          }
-          return combineElements(available, patch);
-        });
-      const loadedRoute =
-        getRouterState(base)?.failedFrom ??
-        (retainedElements && getRouteFromElements(retainedElements)) ??
-        settledRoute;
-      const shouldRefetch =
-        options.adopt !== undefined ||
-        (options.refetch ??
-          (!isSameRscRoute(nextRoute, settledRoute) ||
-            !isSameRscRoute(
-              nextRoute,
-              getRouteFromElements(base) ?? settledRoute,
-            )));
-      const canReuseStatic =
-        options.adopt === undefined &&
-        cache.canReuseStaticRoute(nextRoute, base);
-      if (
-        options.pendingTransition &&
-        shouldRefetch &&
-        !canReuseStatic &&
-        !canPaintInstantOverlay(
-          cache,
-          options.follows ?? 0,
-          nextRoute,
-          getElements(),
-        )
-      ) {
-        const schedule = options.pendingTransition;
-        return new Promise<void>((resolve, reject) => {
-          schedule(async () => {
-            try {
-              await changeRoute(nextRoute, {
-                ...options,
-                pendingTransition: undefined,
-              });
-              resolve();
-            } catch (e) {
-              reject(e);
-            }
-          });
-        });
-      }
-      const controller = new AbortController();
-      const request: NavigationRequest = {
-        controller,
-        target: nextRoute,
-        base,
-      };
-      controller.signal.addEventListener('abort', () => {
-        if (requestRef.current) {
+      // A failed load becomes a failed frame, which the boundary shows.
+      ignoreRejection(show(attempt, outcome));
+    } catch (e) {
+      if (attempt.signal.aborted) {
+        if (attempt.signal.reason === SUPERSEDED) {
           options.onSuperseded?.();
         }
-      });
-      replaceRequest(request);
-      if (requestRef.current !== request) {
         return;
       }
-      setNavigationError(undefined);
-      if (import.meta.hot) {
-        registerRscReloadListener(() => {}, { replace: true });
-      }
-      const routeUrl = options.url ?? getRouteUrl(nextRoute);
-      const initialAttempt: NavigationAttempt = {
-        route: nextRoute,
-        url: routeUrl,
-        follows: options.follows ?? 0,
-      };
-      const requestedPathChanged =
-        initialAttempt.route.path !== settledRoute.path;
-      const createStateForAttempt = (
-        attempt: NavigationAttempt,
-        history: HistoryIntent,
-      ): RouterState =>
-        createRouterState(attempt.route, attempt.url, {
-          history,
-          scroll: options.shouldScroll,
-          pathChanged:
-            requestedPathChanged || attempt.route.path !== settledRoute.path,
-          follows: attempt.follows,
-        });
-      const initialState = createStateForAttempt(
-        initialAttempt,
-        options.history,
-      );
-      if (canReuseStatic || !shouldRefetch) {
-        const routePatch = {
-          [ROUTE_ID]: [nextRoute.path, nextRoute.query],
-          [INTENT_ID]: isSameRscRoute(nextRoute, settledRoute)
-            ? getElements()[INTENT_ID]
-            : null,
-          ...(canReuseStatic ? { [IS_STATIC_ID]: true } : {}),
-        };
-        request.queuedState = initialState;
-        const patch = combineElements(routePatch, {
-          [ROUTER_STATE_ID]: initialState,
-        });
-        request.base =
-          options.refetch === false ? patch : combineElements(base, patch);
-        void mergeElements(patch, mergeWithCachedRoute);
-        return;
-      }
-      const initialFollows = options.follows ?? 0;
-      const instantResponse = options.instant
-        ? startInstantPaint(initialAttempt, initialState, controller.signal)
-        : undefined;
-      const instantBase = instantResponse
-        ? cache.getPrefetchedElements(nextRoute)
-        : undefined;
-      const loadPatch = async (): Promise<Elements> => {
-        const adopt = options.adopt ?? instantResponse;
-        const outcome = await cache.load(nextRoute, {
-          signal: controller.signal,
-          refetch: shouldRefetch,
-          has404,
-          base,
-          url: routeUrl,
-          follows: initialFollows,
-          ...(adopt ? { adopt } : {}),
-        });
-        if (requestRef.current !== request) {
-          return {};
-        }
-        if (outcome.type === 'aborted') {
-          requestRef.current = undefined;
-          return {};
-        }
-        const historyIntent =
-          instantResponse &&
-          outcome.follows > initialFollows &&
-          options.history !== null
-            ? 'replace'
-            : options.history;
-        if (outcome.type === 'leave') {
-          commitHistory(outcome.url, historyIntent);
-          window.location.replace(outcome.location.href);
-          return {};
-        }
-        if (outcome.type === 'failed') {
-          const { error } = outcome;
-          if (isBuildIdMismatch(error)) {
-            reloadWithUrl(outcome.url);
-            return {};
-          }
-          commitHistory(outcome.url, historyIntent);
-          const failureState: RouterState = {
-            ...createRouterState(outcome.route, outcome.url, {
-              history: null,
-              scroll: false,
-              pathChanged: false,
-              follows: outcome.follows,
-            }),
-            failedFrom: loadedRoute,
-          };
-          const patch = {
-            ...(instantResponse
-              ? {
-                  [ROUTE_ID]: base[ROUTE_ID],
-                  [IS_STATIC_ID]: base[IS_STATIC_ID],
-                }
-              : {}),
-            [ROUTER_STATE_ID]: failureState,
-          };
-          request.queuedState = failureState;
-          const baseRoute = resolveSettledRoute(base, initialRoute);
-          request.base = combineElements(base, {
-            ...patch,
-            [ROUTE_ID]: [baseRoute.path, baseRoute.query],
-          });
-          startTransition(() => {
-            void mergeElements(patch, (prevPromise) =>
-              prevPromise.then((prev) => {
-                const origin = instantResponse
-                  ? baseRoute
-                  : resolveSettledRoute(prev, initialRoute);
-                return combineElements(prev, {
-                  ...patch,
-                  [ROUTE_ID]: [origin.path, origin.query],
-                });
-              }),
-            );
-          });
-          setNavigationError({ error });
-          throw error;
-        }
-        const adopted =
-          outcome.type === 'loaded' &&
-          !!instantResponse &&
-          outcome.follows === initialFollows;
-        const responsePatch =
-          outcome.type === 'reused'
-            ? {
-                [ROUTE_ID]: [outcome.route.path, outcome.route.query],
-                [INTENT_ID]: null,
-                [IS_STATIC_ID]:
-                  cache.canReuseStaticRoute(outcome.route, base) ||
-                  isStaticFromElements(base),
-              }
-            : outcome.elements;
-        const destination = resolveServerRedirect(
-          responsePatch,
-          createStateForAttempt(outcome, historyIntent),
-          outcome.route.path,
-        );
-        const state =
-          adopted && isSameRoute(destination.route, initialAttempt.route)
-            ? initialState
-            : {
-                ...createStateForAttempt(
-                  { ...destination, follows: outcome.follows },
-                  historyIntent,
-                ),
-                ...(adopted ? { originalState: initialState } : {}),
-              };
-        request.target = destination.route;
-        request.queuedState = state;
-        const patch = combineElements(responsePatch, {
-          [ROUTER_STATE_ID]: state,
-        });
-        const cacheBase = combineElements(
-          adopted && instantBase ? combineElements(base, instantBase) : base,
-          patch,
-        );
-        request.base = adopted ? { ...cacheBase } : cacheBase;
-        if (adopted) {
-          responseFallback = instantBase
-            ? combineElements(instantBase, responsePatch)
-            : responsePatch;
-          return combineElements({}, patch, {
-            filter: (key) =>
-              key === ROUTER_STATE_ID ||
-              (typeof key === 'string' && isMetaKey(key)),
-          });
-        }
-        const responseRoute = getRouteFromElements(patch);
-        if (
-          responseRoute &&
-          !isSameRscRoute(
-            responseRoute,
-            instantResponse ? initialAttempt.route : settledRoute,
-          )
-        ) {
-          const slotId = getRouteSlotId(responseRoute.path);
-          const routePatch = combineElements({}, patch, {
-            filter: (key) =>
-              typeof key === 'string' && (key === slotId || isMetaKey(key)),
-          });
-          startTransition(() => {
-            void mergeElements(routePatch, mergeWithCachedRoute);
-          });
-        }
-        return patch;
-      };
-      const patchPromise = loadPatch();
-      if (instantResponse) {
-        try {
-          await instantResponse;
-        } catch {
-          startTransition(() => {
-            void mergeElements(patchPromise, mergeWithCachedRoute);
-          });
-          await patchPromise;
-          return;
-        }
-        const patch = await patchPromise;
-        if (getRouterState(patch)) {
-          startTransition(() => {
-            void mergeElements(patch, mergeWithCachedRoute);
-          });
-        }
-        return;
-      }
-      await mergeElements(patchPromise, mergeWithCachedRoute);
-    },
-    [
-      cache,
-      initialRoute,
-      startInstantPaint,
-      mergeElements,
-      getElements,
-      replaceRequest,
-      has404,
-      registerRscReloadListener,
-    ],
-  );
+      throw e;
+    }
+  };
 
-  const getPendingRoute = useCallback(() => requestRef.current?.target, []);
-  const isCurrentRoute = useCallback(
-    (source: Elements) => {
-      const committed = getElements();
-      const state = getRouterState(source);
-      const request = requestRef.current;
+  // Every route change the router itself starts goes through here.
+  const request = (
+    route: RouteProps,
+    options: ChangeRouteOptions,
+    source: Source,
+  ): Promise<void> => {
+    const url = options.url ?? getRouteUrl(route);
+    if (!isSameOrigin(url)) {
+      const error = otherOriginError(url);
+      update(runNow, (prev) =>
+        failedHere(prev, current.route, new URL(window.location.href), error),
+      );
+      return Promise.reject(error);
+    }
+    return options.history === null
+      ? applyInPlace(route, options, source)
+      : navigate(route, url, options.history, options, source);
+  };
+  const changeRoute: ChangeRoute = (route, options) =>
+    request(route, options, fetched);
+
+  const onNavigate = createNavigateListener({
+    at: () => current,
+    attempts,
+    start,
+    show,
+  });
+
+  // Fragment-only navigations are not intercepted, so record their hash.
+  const onEntryChange = () => {
+    const entryUrl = window.navigation.currentEntry?.url;
+    if (!entryUrl) {
+      return;
+    }
+    const url = new URL(entryUrl);
+    const initial = { route: current.route, url: getRouteUrl(current.route) };
+    update(runNow, (prev) => withFragment(prev, initial, url));
+  };
+
+  return {
+    changeRoute,
+    /** Records what React committed. */
+    commit(committed: Committed) {
+      current = committed;
+      const { frame } = committed;
+      if (frame.kind !== 'preview') {
+        // A preview is still waiting for the response that fills it in.
+        attempts.release(frame.scope.navigation);
+      }
+      if (frame.kind !== 'failed') {
+        committed.cache.learnStaticFromElements(committed.elements);
+      }
+      if (frame.kind !== 'initial') {
+        // Lets the browser finish the navigation this frame belongs to.
+        frame.committed();
+      }
+    },
+    /**
+     * Starts listening to the browser. The caller runs this from the first
+     * layout effect under the router, so a navigation started by any other
+     * layout effect during mount is already seen.
+     */
+    connect() {
+      const { navigation } = window;
+      navigation.addEventListener('navigate', onNavigate);
+      navigation.addEventListener('currententrychange', onEntryChange);
+      return () => {
+        navigation.removeEventListener('navigate', onNavigate);
+        navigation.removeEventListener('currententrychange', onEntryChange);
+      };
+    },
+    disconnect: () => attempts.dropAll(UNMOUNTED),
+    getElements: () => current.elements,
+    getRoute: () => current.route,
+    getOrigin: () => originOfFrame(current.frame),
+    getScope: () => current.frame.scope,
+    /**
+     * Whether `scope` still describes what is on screen and no navigation is
+     * loading. With `exact`, a fragment change since then also ends it.
+     */
+    isCurrentScope(scope: Scope, exact: boolean) {
+      const shown = current.frame.scope;
       return (
-        getRouterState(committed) === state &&
-        committed[INTENT_ID] === source[INTENT_ID] &&
-        (!request || (!!request.queuedState && request.queuedState === state))
+        scope.navigation === shown.navigation &&
+        (!exact || scope.fragment === shown.fragment) &&
+        !attempts.pending(shown.navigation)
       );
     },
-    [getElements],
-  );
-  const applyRouteResponse = useCallback(
-    async (responseElements: Elements) => {
-      const nextRoute = getRouteFromElements(responseElements)!;
-      const current = getSettledRoute();
+    getPendingRoute: () =>
+      attempts.pending(current.frame.scope.navigation)?.target,
+    // During development a reload refetches the route the user is heading
+    // for: one already queued but not painted yet, or else the one shown.
+    getRefetchRoute: () => attempts.queuedRoute() ?? current.route,
+    // A navigation still waiting for its response was requested from code
+    // that has since changed; its response must not be shown.
+    dropLoading: () => attempts.dropLoading(OUTDATED),
+    // Follows a redirect or not-found that settled after its page was
+    // shown. It continues the navigation that page came from, so it counts
+    // against the same limit of follows.
+    followIntent: (route: RouteProps, url: URL, shouldScroll: boolean) =>
+      request(
+        route,
+        { shouldScroll, history: 'replace', url },
+        {
+          kind: 'fetch',
+          follows: (originOfFrame(current.frame)?.follows ?? 0) + 1,
+        },
+      ),
+    // A server function's response that names a route.
+    async applyRouteResponse(response: Elements) {
+      const next = getRouteFromElements(response)!;
+      const shown = current.route;
       const sameRoute =
-        current.path === nextRoute.path &&
-        (isStaticFromElements(responseElements) ||
-          current.query === nextRoute.query);
-      const is404 = nextRoute.path === '/404';
-      await dispatchChangeRoute(changeRoute, sameRoute ? current : nextRoute, {
-        adopt: Promise.resolve(responseElements),
+        shown.path === next.path &&
+        (isStaticFromElements(response) || shown.query === next.query);
+      const is404 = next.path === '/404';
+      const source: Source = {
+        kind: 'response',
+        response: Promise.resolve(response),
+        // A rerender of the displayed route is still the same navigation.
+        follows: sameRoute ? (originOfFrame(current.frame)?.follows ?? 0) : 0,
+      };
+      const apply: ChangeRoute = (route, options) =>
+        request(route, options, source);
+      await dispatchChangeRoute(apply, sameRoute ? shown : next, {
         shouldScroll: false,
         history: sameRoute || is404 ? null : 'push',
         ...(is404 ? { url: new URL(window.location.href) } : {}),
-      }).catch(() => {});
+      }).catch(reportUnlessAborted);
     },
-    [changeRoute, getSettledRoute],
-  );
-  useServerFunctionRouting(serverFunctionRouting, {
-    getSettledRoute,
-    getPendingRoute,
-    applyRouteResponse,
-  });
-
-  useEffect(() => {
-    const callback = () => {
-      const popped = parseRoute(new URL(window.location.href));
-      const nextRoute = routeInterceptor ? routeInterceptor(popped) : popped;
-      if (!nextRoute) {
-        return;
-      }
-      startTransition(() => {
-        changeRoute(nextRoute, {
-          shouldScroll: shouldScrollForRouteChange(
-            nextRoute,
-            getSettledRoute(),
-          ),
-          history: null, // the browser already moved the address bar
-          // keep the url it moved to; an interceptor rewrite needs a new one
-          url: isSameRoute(nextRoute, popped)
-            ? new URL(window.location.href)
-            : getRouteUrl(nextRoute),
-        }).catch((err) => {
-          console.error('Error while navigating back:', err);
-        });
-      });
-    };
-    window.addEventListener('popstate', callback);
-    return () => {
-      window.removeEventListener('popstate', callback);
-    };
-  }, [changeRoute, routeInterceptor, getSettledRoute]);
-
-  return {
-    route,
-    changeRoute,
-    getElements,
-    isCurrentRoute,
-    error: navigationError,
+    // A server function rerendered the displayed route while a navigation
+    // is loading. The navigation goes on; the rerender joins the queued
+    // frames, so it is there if the user ends up on that route after all.
+    applyOriginRerender(response: Elements) {
+      const origin = current.route;
+      update(startTransition, (prev) =>
+        withRerender(prev, current.route, origin, response),
+      );
+    },
   };
 }

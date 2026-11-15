@@ -1,0 +1,78 @@
+/** @vitest-environment happy-dom */
+import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { resolveServerRedirect } from '../src/router/client-utils/server-redirect.js';
+import {
+  IS_STATIC_ID,
+  ROUTE_ID,
+} from '../src/router/isomorphic-utils/router-protocol.js';
+
+beforeEach(() => {
+  vi.stubEnv('WAKU_CONFIG_BASE_PATH', '/');
+});
+
+const route = (path: string, query = '', hash = '') => ({ path, query, hash });
+
+const urlOf = (path: string) => new URL(path, window.location.origin);
+
+describe('resolveServerRedirect', () => {
+  test('path from the elements, query and hash from the requested url', () => {
+    const requested = { route: route('/a', 'x=1'), url: urlOf('/a?x=1#top') };
+    const elements = { [ROUTE_ID]: ['/a', 'x=1'] };
+    const { route: resolvedRoute, url } = resolveServerRedirect(
+      elements,
+      requested,
+      '/f',
+    );
+    expect(resolvedRoute).toEqual(route('/a', 'x=1', '#top'));
+    expect(url.pathname).toBe('/a');
+  });
+
+  test('a static response does not echo the query; the requested url keeps it', () => {
+    const requested = { route: route('/a', 'x=1'), url: urlOf('/a?x=1') };
+    const elements = { [ROUTE_ID]: ['/a', ''], [IS_STATIC_ID]: true };
+    const { route: resolvedRoute, url } = resolveServerRedirect(
+      elements,
+      requested,
+      '/f',
+    );
+    expect(resolvedRoute.query).toBe('x=1');
+    expect(url.search).toBe('?x=1');
+  });
+
+  test('a server redirect moves the route and the url', () => {
+    const requested = { route: route('/a'), url: urlOf('/a') };
+    const elements = { [ROUTE_ID]: ['/b', 'y=2'] };
+    const { route: resolvedRoute, url } = resolveServerRedirect(
+      elements,
+      requested,
+      '/f',
+    );
+    expect(resolvedRoute).toEqual(route('/b', 'y=2'));
+    expect(url.pathname).toBe('/b');
+    expect(url.search).toBe('?y=2');
+  });
+
+  test('a server redirect keeps the base path in the url', () => {
+    vi.stubEnv('WAKU_CONFIG_BASE_PATH', '/docs/');
+    try {
+      const requested = { route: route('/a'), url: urlOf('/docs/a') };
+      const elements = { [ROUTE_ID]: ['/b', ''] };
+      const { url } = resolveServerRedirect(elements, requested, '/f');
+      expect(url.pathname).toBe('/docs/b');
+    } finally {
+      vi.stubEnv('WAKU_CONFIG_BASE_PATH', '/');
+    }
+  });
+
+  test('a server redirect to the 404 route keeps the requested url', () => {
+    const requested = { route: route('/missing'), url: urlOf('/missing') };
+    const elements = { [ROUTE_ID]: ['/404', ''] };
+    const { route: resolvedRoute, url } = resolveServerRedirect(
+      elements,
+      requested,
+      '/f',
+    );
+    expect(resolvedRoute.path).toBe('/404');
+    expect(url.pathname).toBe('/missing');
+  });
+});

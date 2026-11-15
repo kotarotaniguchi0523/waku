@@ -26,6 +26,7 @@ const require = createRequire(import.meta.url);
 
 const clientExports = [
   'Children_UNSTABLE',
+  'ControlledRoot_UNSTABLE',
   'Root_UNSTABLE',
   'Slot_UNSTABLE',
   'unstable_combineElements',
@@ -35,6 +36,7 @@ const clientExports = [
   'unstable_isImmutableElement',
   'useElementsPromise_UNSTABLE',
   'useFetchRsc_UNSTABLE',
+  'useInitialElements_UNSTABLE',
   'useMergeElements_UNSTABLE',
   'useRegisterRscReloadListener_UNSTABLE',
 ];

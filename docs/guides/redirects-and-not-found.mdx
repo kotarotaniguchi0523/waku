@@ -235,8 +235,8 @@ function's result and let the client decide whether to call `router.replace()`.
 The return value remains available even when Waku discards a stale intent.
 
 Use Router's `push` or `replace` to coordinate query and hash changes with route
-rendering. A full route response can replace URL changes made directly with the
-History API; a partial response leaves them alone.
+rendering. The router leaves URL changes made directly with the History API
+alone.
 
 ## Document Navigation Handoff
 
@@ -246,11 +246,14 @@ policy prevents departure, Waku does not guarantee URL rollback, removal of an
 instant preview, or continued processing of old intents and origin rerenders.
 Start a fresh Router navigation or reload to recover.
 
-Use a native anchor for flows that need the browser's cancelable document
-navigation and history behavior:
+The router handles same-origin anchors as client navigations. For flows that
+need the browser's cancelable document navigation and history behavior, mark
+the anchor with `rel="external"` so the router leaves it to the browser:
 
 ```tsx
-<a href="/account/logout">Log out</a>
+<a href="/account/logout" rel="external">
+  Log out
+</a>
 ```
 
 The server can redirect that document request to another origin without starting

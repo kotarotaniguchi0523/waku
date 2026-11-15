@@ -35,6 +35,30 @@ export default function StartPage() {
         </Link>
       </p>
       <p>
+        <Link to="/late-hash#late-soon" data-testid="go-late-soon">
+          Go late hash target
+        </Link>
+      </p>
+      <p>
+        <Link
+          to="/late-hash#late-soon"
+          scroll={false}
+          data-testid="go-late-soon-no-scroll"
+        >
+          Go late hash target without scrolling
+        </Link>
+      </p>
+      <p>
+        <Link to="/late-hash#late-slow" data-testid="go-late-slow">
+          Go slow late hash target
+        </Link>
+      </p>
+      <p>
+        <Link to="/late-hash#late-never" data-testid="go-late-never">
+          Go too late hash target
+        </Link>
+      </p>
+      <p>
         <Link
           to="/next?from=enter"
           unstable_prefetchOnEnter={{}}
