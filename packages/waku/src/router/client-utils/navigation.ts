@@ -123,13 +123,18 @@ const withEntryHash = (route: RouteProps, url: URL): RouteProps => {
     : route;
 };
 
-// `<a rel="external">` opts a same-origin link out of client navigation.
-const isExternalLink = (element: Element | null | undefined) =>
-  !!element
-    ?.closest('a, area')
-    ?.getAttribute('rel')
-    ?.split(/\s+/)
-    .includes('external');
+// `<a rel="external">` opts a same-origin link out of client navigation, and
+// a `download` link is the browser's to handle. The event's own
+// `downloadRequest` is checked too, but one browser follows it with a second
+// event that does not carry it.
+const isExternalLink = (element: Element | null | undefined) => {
+  const anchor = element?.closest('a, area');
+  return (
+    !!anchor &&
+    (anchor.hasAttribute('download') ||
+      !!anchor.getAttribute('rel')?.split(/\s+/).includes('external'))
+  );
+};
 
 const runNow = (update: () => void) => update();
 
@@ -752,7 +757,11 @@ export function useNavigation(
       const requestedRoute = info?.route ?? parseRoute(url);
       const nextRoute = requestedRoute;
       const options: ChangeRouteOptions = info?.options ?? {
-        shouldScroll: true,
+        // Back and Forward between entries that differ only in the query stay
+        // where the page is, like a query-only push.
+        shouldScroll:
+          event.navigationType !== 'traverse' ||
+          shouldScrollForRouteChange(nextRoute, committedRef.current.route),
         history: event.navigationType === 'replace' ? 'replace' : 'push',
       };
       const attempt = startAttempt(nextRoute);
@@ -774,17 +783,25 @@ export function useNavigation(
         }
       };
 
-      // Tagged, so this listener lets the browser load the document.
       const handOff = (prepared: Prepared & { kind: 'leave' | 'reload' }) => {
+        const push = event.navigationType === 'push';
+        if (prepared.kind === 'leave' && !isSameOrigin(prepared.location)) {
+          // Another origin is never intercepted; `location` is the one way
+          // to leave that every browser honours here.
+          if (push) {
+            window.location.assign(prepared.location.href);
+          } else {
+            window.location.replace(prepared.location.href);
+          }
+          return;
+        }
+        // Same origin: tagged, so this listener lets the browser load the
+        // document. For a build mismatch that is the requested URL itself.
         const result = navigation.navigate(
           prepared.kind === 'leave'
             ? prepared.location.href
-            : // Another build answered: load its document at this URL.
-              prepared.url.href,
-          {
-            info: HANDOFF,
-            history: event.navigationType === 'push' ? 'push' : 'replace',
-          },
+            : prepared.url.href,
+          { info: HANDOFF, history: push ? 'push' : 'replace' },
         );
         ignoreRejection(result.committed);
         ignoreRejection(result.finished);
@@ -910,7 +927,9 @@ export function useNavigation(
               throw e;
             }
             if (result.kind === 'leave' || result.kind === 'reload') {
-              handOff(result);
+              // Cancel this navigation first. A document navigation started
+              // while it is still being cancelled can be cancelled with it.
+              setTimeout(() => handOff(result));
               throw abortError();
             }
             if (result.url.href !== event.destination.url) {
