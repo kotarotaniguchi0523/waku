@@ -33,6 +33,15 @@ export default function Layout({ children }: { children: ReactNode }) {
         <Link to={'/missing' as never} data-testid="go-missing">
           Missing
         </Link>
+        <Link
+          to="/gated-child-error?gate=g7"
+          data-testid="go-gated-child-error"
+        >
+          Gated child error
+        </Link>
+        <Link to="/transition" data-testid="go-transition">
+          Transition
+        </Link>
         <Link to="/broken" data-testid="go-broken">
           Broken
         </Link>

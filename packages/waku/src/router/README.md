@@ -43,3 +43,32 @@ change touches them.
 
 `e2e/navigation-contract.spec.ts` checks these from the outside: the address
 bar, the visible content, scroll, Back and Forward, and the public router API.
+
+## Decided limits
+
+- There is no timeout on a frame that React has not committed. The
+  navigation stays pending, which is what the browser's busy indicator should
+  show, until the frame commits or a newer navigation takes over.
+- Streamed content that fails after its page is shown is handled by React's
+  error boundaries, not by the router. Without a boundary in the app the
+  router's own boundary replaces the page with the error.
+- Several `Router` instances may be mounted. Each listens to the same
+  `navigate` event and renders the destination itself; they share the
+  document's URL and history. Server function calls go to the most recently
+  mounted one.
+- `push()` and `replace()` resolve when the frame is queued or the navigation
+  is superseded, and reject when the route fails to load. They do not report
+  a frame that was queued and then abandoned before it was shown.
+
+## Checks that need a real device
+
+Automated browsers cannot perform these, so run them by hand before a release
+that touches navigation:
+
+- Swipe back and forward on a touch device or trackpad. The browser shows its
+  own preview of the destination and reports `hasUAVisualTransition`; the page
+  must not animate a second time, and each entry's scroll position must be
+  restored.
+- Navigate with a `<ViewTransition>` around the route on a slow connection.
+  The transition must finish and focus must land on the new page.
+  (`e2e/router-client.spec.ts` covers the fast case.)

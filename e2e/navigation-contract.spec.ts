@@ -373,6 +373,64 @@ test.describe('navigation-contract', () => {
     await expect(page.getByTestId('hydrated')).toHaveText('yes');
   });
 
+  // Without an error boundary of its own, content that fails after the page
+  // is on screen takes the page down with it, like a page that fails outright.
+  test('G7: content that fails after the page is shown leaves the address bar and Back recovers', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.getByTestId('go-plain').click();
+    await expect(shownPage(page)).toHaveText('plain');
+    await page.getByTestId('go-gated-child-error').click();
+    await expect(shownPage(page)).toHaveText('gated-child-error');
+    await releaseGate(page, 'g7');
+    await expect(shownPage(page)).toHaveCount(0);
+    await expect(page).toHaveURL(`${origin()}/gated-child-error?gate=g7`);
+    await page.goBack();
+    await expect(shownPage(page)).toHaveText('plain');
+    await expect(page).toHaveURL(`${origin()}/plain`);
+    await page.getByTestId('go-home').click();
+    await expect(shownPage(page)).toHaveText('home');
+  });
+
+  test('T18: a navigation animated with a view transition finishes, and Back works', async ({
+    page,
+  }) => {
+    await open(page, '/');
+    await page.evaluate(() => {
+      const counts = { finished: 0, failed: 0 };
+      window.navigation.addEventListener('navigatesuccess', () => {
+        counts.finished += 1;
+      });
+      window.navigation.addEventListener('navigateerror', () => {
+        counts.failed += 1;
+      });
+      (
+        window as unknown as { navigationCounts: typeof counts }
+      ).navigationCounts = counts;
+    });
+    const counts = () =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              navigationCounts: { finished: number; failed: number };
+            }
+          ).navigationCounts,
+      );
+    await page.getByTestId('go-transition').click();
+    await expect(shownPage(page)).toHaveText('transition');
+    await expect(page).toHaveURL(`${origin()}/transition`);
+    // The browser was told the navigation is done; it is not left waiting on
+    // the animation.
+    await expect.poll(async () => (await counts()).finished).toBe(1);
+    await page.goBack();
+    await expect(shownPage(page)).toHaveText('home');
+    await expect(page).toHaveURL(`${origin()}/`);
+    await expect.poll(async () => (await counts()).finished).toBe(2);
+    expect((await counts()).failed).toBe(0);
+  });
+
   test('T19: under StrictMode the router hook follows a navigation, Back, a fragment and a state change', async ({
     page,
   }) => {
